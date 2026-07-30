@@ -73,14 +73,14 @@ func TestRecipients(t *testing.T) {
 		Cc:  []string{"c@example.com"},
 		Bcc: []string{"secret@example.com"},
 	}
-	got := m.recipients()
+	got := m.Recipients()
 	want := []string{"b@example.com", "c@example.com", "secret@example.com"}
 	if len(got) != len(want) {
-		t.Fatalf("recipients() = %v, want %v", got, want)
+		t.Fatalf("Recipients() = %v, want %v", got, want)
 	}
 	for i, w := range want {
 		if got[i] != w {
-			t.Errorf("recipients()[%d] = %q, want %q", i, got[i], w)
+			t.Errorf("Recipients()[%d] = %q, want %q", i, got[i], w)
 		}
 	}
 }
