@@ -25,8 +25,16 @@ OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
+
+// ErrSuppressed is returned by the Suppress middleware when every recipient
+// (To ∪ Cc ∪ Bcc) has been filtered out as suppressed, so there is no one
+// left to send to. Suppress returns it in place of calling next, giving
+// callers (e.g. SendBulk) a distinguishable, explicit outcome instead of
+// having to infer a skip from an emptied recipient list.
+var ErrSuppressed = errors.New("email: all recipients suppressed")
 
 // Deduper decides whether a Message identified by an opaque dedup key has
 // already been sent, and records that a key has now been sent. Consumers
@@ -162,7 +170,9 @@ func Record(r Recorder) Middleware {
 
 // Suppress returns a Middleware that removes addresses reported as
 // suppressed by s from To, Cc, and Bcc before calling next. It is typically
-// placed ahead of bulk sends to honor bounce or unsubscribe lists.
+// placed ahead of bulk sends to honor bounce or unsubscribe lists. If
+// filtering leaves no recipient at all, it returns ErrSuppressed without
+// calling next, rather than attempting a send with zero recipients.
 func Suppress(s Suppressor) Middleware {
 	filter := func(ctx context.Context, addrs []string) ([]string, error) {
 		if len(addrs) == 0 {
@@ -195,6 +205,9 @@ func Suppress(s Suppressor) Middleware {
 				return err
 			}
 			m.To, m.Cc, m.Bcc = to, cc, bcc
+			if len(to)+len(cc)+len(bcc) == 0 {
+				return ErrSuppressed
+			}
 			return next(ctx, m)
 		}
 	}

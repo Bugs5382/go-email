@@ -25,6 +25,7 @@ OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -110,15 +111,13 @@ func (s *sender) SendBulk(ctx context.Context, kind string, base Message, recipi
 
 		sendErr := s.send(ctx, &m)
 		switch {
-		case sendErr != nil:
-			result.Failed++
-			result.Errors[rcpt.Address] = sendErr
-		case len(m.To) == 0:
-			// A middleware (e.g. Suppress) removed the only recipient
-			// before delivery: nothing was actually sent.
+		case sendErr == nil:
+			result.Sent++
+		case errors.Is(sendErr, ErrSuppressed):
 			result.Skipped++
 		default:
-			result.Sent++
+			result.Failed++
+			result.Errors[rcpt.Address] = sendErr
 		}
 
 		if cfg.throttle > 0 && i < len(recipients)-1 {

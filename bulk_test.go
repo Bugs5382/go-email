@@ -93,12 +93,7 @@ func TestSendBulkAppliesListUnsubscribe(t *testing.T) {
 
 func TestSendBulkSuppressedRecipientCountsSkipped(t *testing.T) {
 	var tos []string
-	tr := transportFunc(func(_ context.Context, m Message) error {
-		if len(m.To) > 0 {
-			tos = append(tos, m.To[0])
-		}
-		return nil
-	})
+	tr := transportFunc(func(_ context.Context, m Message) error { tos = append(tos, m.To[0]); return nil })
 	r := newFakeRenderer()
 	if err := r.register("promo", "Hi {{.Name}}", "", "Hi {{.Name}}"); err != nil {
 		t.Fatal(err)
@@ -120,6 +115,9 @@ func TestSendBulkSuppressedRecipientCountsSkipped(t *testing.T) {
 	}
 	if res.Skipped != 1 {
 		t.Errorf("skipped = %d, want 1", res.Skipped)
+	}
+	if res.Failed != 0 || len(res.Errors) != 0 {
+		t.Errorf("a suppressed recipient must count as Skipped, not Failed: failed=%d errors=%v", res.Failed, res.Errors)
 	}
 	assertSameSet(t, tos, []string{"ok@example.com"})
 }
