@@ -88,3 +88,14 @@ func TestRetryNotOnValidation(t *testing.T) {
 		t.Errorf("must not retry non-transient; attempts = %d", n)
 	}
 }
+
+func TestRetryZeroAttemptsSendsOnce(t *testing.T) {
+	n := 0
+	base := SendFunc(func(context.Context, *Message) error { n++; return nil })
+	if err := chain(base, Retry(0, time.Millisecond))(context.Background(), &Message{}); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("attempts = %d, want 1", n)
+	}
+}

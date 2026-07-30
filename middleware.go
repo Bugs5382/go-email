@@ -102,10 +102,14 @@ func Validate() Middleware {
 // fails with a TransientError, using exponential backoff starting at base
 // (base, base*2, base*4, ...) between attempts. Non-transient errors are
 // returned immediately without retrying. The wait between attempts honors
-// ctx cancellation.
+// ctx cancellation. An attempts value below 1 is treated as 1, so next is
+// always called at least once rather than being silently skipped.
 func Retry(attempts int, base time.Duration) Middleware {
 	return func(next SendFunc) SendFunc {
 		return func(ctx context.Context, m *Message) error {
+			if attempts < 1 {
+				attempts = 1
+			}
 			var err error
 			for i := 0; i < attempts; i++ {
 				err = next(ctx, m)
