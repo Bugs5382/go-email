@@ -1,0 +1,62 @@
+version: '3'
+vars:
+  ARTIFACT_NAME: go-email
+  TESTPARALLELISM: 4
+  GOLIC_VERSION: v0.3.0
+  COMMON_LIC: "2026 Shane"
+  TEMPLATE_LIC: "mit"
+tasks:
+  default:
+    cmds:
+      - task: lint
+  fmt:
+    desc: Format Go sources
+    cmds:
+      - gofmt -w .
+      - goimports -w ./
+  build:
+    desc: Build all packages
+    cmds:
+      - go build ./...
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+  test:
+    desc: Run tests
+    cmds:
+      - go test -parallel {{.TESTPARALLELISM}} ./...
+  test-cover:
+    desc: Run tests with coverage reporting
+    cmds:
+      - go test ./... -cover
+  lint:
+    desc: Run all linters
+    deps: [test]
+    cmds:
+      - |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then echo "gofmt needed on:"; echo "$unformatted"; exit 1; fi
+      - golangci-lint run
+      - yamllint .
+  ci:
+    desc: Full local CI gate -- build, vet, test, and lint (golangci-lint + yamllint)
+    cmds:
+      - task: build
+      - task: vet
+      - task: lint
+  lint-init:
+    desc: Install lint dependencies via Brew
+    cmds:
+      - brew install golangci-lint gitleaks yamllint
+      - go install golang.org/x/tools/cmd/goimports@latest
+  license:
+    desc: Verify every source file carries the MIT license header (CI; never writes).
+    cmds:
+      - go install github.com/Bugs5382/golic/cmd/golic@{{.GOLIC_VERSION}}
+      - golic inject -t {{.TEMPLATE_LIC}} -c "{{.COMMON_LIC}}" --dry -x
+  license:fix:
+    desc: Inject the MIT header into any source file missing it.
+    cmds:
+      - go install github.com/Bugs5382/golic/cmd/golic@{{.GOLIC_VERSION}}
+      - golic inject -t {{.TEMPLATE_LIC}} -c "{{.COMMON_LIC}}"
