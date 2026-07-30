@@ -138,6 +138,20 @@ func TestSuppressDropsSuppressedAddresses(t *testing.T) {
 	}
 }
 
+func TestSuppressAllRecipientsReturnsErrSuppressed(t *testing.T) {
+	s := suppressorFunc(func(context.Context, string) (bool, error) { return true, nil })
+	called := false
+	base := SendFunc(func(context.Context, *Message) error { called = true; return nil })
+	m := &Message{To: []string{"a@example.com"}, Cc: []string{"b@example.com"}, Bcc: []string{"c@example.com"}}
+	err := chain(base, Suppress(s))(context.Background(), m)
+	if !errors.Is(err, ErrSuppressed) {
+		t.Fatalf("err = %v, want ErrSuppressed", err)
+	}
+	if called {
+		t.Error("next must not be called when every recipient is suppressed")
+	}
+}
+
 func TestSignNilIsIdentity(t *testing.T) {
 	calls := 0
 	base := SendFunc(func(context.Context, *Message) error { calls++; return nil })
