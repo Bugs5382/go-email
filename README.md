@@ -1,8 +1,8 @@
-# go-email
+# go-email ✉️
 
-A small, dependency-light email client for Go: a full RFC 5322 envelope,
-multipart (`alternative`/`mixed`/`related`) rendering, and an ordered
-middleware chain around a pluggable `Transport`.
+> A small, dependency-light email client for Go: a full RFC 5322 envelope,
+> multipart (`alternative`/`mixed`/`related`) rendering, and an ordered
+> middleware chain around a pluggable `Transport`.
 
 The exported surface is a set of neutral interfaces (`Transport`, `Renderer`,
 `Sender`), so a caller never has to import `net/smtp` or `mime/multipart`
@@ -10,13 +10,13 @@ directly. The core package stays dependency-free and telemetry-free; SMTP
 delivery, templated rendering, and OpenTelemetry instrumentation each live in
 their own subpackage.
 
-## Install
+## 📦 Install
 
 ```bash
 go get github.com/Bugs5382/go-email
 ```
 
-## Usage
+## 🚀 Usage
 
 ```go
 renderer := template.New()
@@ -45,7 +45,7 @@ point it at a real relay by setting `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/
 `SMTP_PASS`/`SMTP_TLS` in production. See [`example_test.go`](example_test.go)
 for a complete, compilable example.
 
-## Envelope
+## 📨 Envelope
 
 `Message` is the neutral, transport-agnostic envelope: `From`/`To`/`Cc`/`Bcc`,
 `ReplyTo`, `Subject`/`HTML`/`Text`, `Attachments` (including inline
@@ -59,7 +59,7 @@ attachments referenced via `cid:`), arbitrary `Headers`, `Priority` and
 - `Bcc` recipients are only ever passed to the transport's envelope (SMTP
   `RCPT TO`); they are never written into a message header.
 
-## Middleware and hooks
+## 🪝 Middleware and hooks
 
 `Sender` runs every `Message` through an ordered middleware chain before
 handing it to the `Transport`:
@@ -80,7 +80,7 @@ handing it to the `Transport`:
 middleware chain, with per-recipient throttling and a `BulkResult` tally
 instead of aborting the batch on the first failure.
 
-## Subpackages
+## 🧩 Subpackages
 
 - [`smtp`](smtp) -- `Config`/`LoadConfig` and an `SMTPTransport` speaking
   `net/smtp`, with a plaintext no-auth path for local catchers (e.g.
@@ -93,7 +93,7 @@ instead of aborting the batch on the first failure.
   package in this module that imports `go.opentelemetry.io/otel`; the core
   package stays telemetry-free.
 
-## Develop
+## 🛠 Develop
 
 ```bash
 task build    # go build ./...
@@ -103,6 +103,6 @@ task ci       # build + vet + lint
 task license  # verify every source file carries the MIT header
 ```
 
-## License
+## ⚖️ License
 
 MIT © 2026 Shane
