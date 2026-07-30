@@ -57,6 +57,9 @@ const spanName = "email.send"
 // caller; passing noop implementations disables telemetry without changing
 // call sites.
 func Middleware(tracer trace.Tracer, meter metric.Meter) email.Middleware {
+	// The error is intentionally ignored: per the OTel-go contract, a usable
+	// no-op instrument is returned even when construction fails, so counter
+	// and duration are always safe to call below.
 	counter, _ := meter.Int64Counter(
 		"email.send.count",
 		metric.WithDescription("Number of email send attempts, by status."),
@@ -77,6 +80,7 @@ func Middleware(tracer trace.Tracer, meter metric.Meter) email.Middleware {
 			}
 
 			ctx, span := tracer.Start(ctx, spanName, trace.WithAttributes(attrs...))
+			defer span.End()
 			start := time.Now()
 
 			err := next(ctx, m)
@@ -87,7 +91,6 @@ func Middleware(tracer trace.Tracer, meter metric.Meter) email.Middleware {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
 			}
-			span.End()
 
 			statusAttr := attribute.String("status", status)
 			counter.Add(ctx, 1, metric.WithAttributes(statusAttr))
