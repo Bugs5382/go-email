@@ -134,11 +134,18 @@ func (m Message) headerLines() []headerKV {
 	return h
 }
 
-// recipients returns the full SMTP RCPT TO set: To ∪ Cc ∪ Bcc.
-func (m Message) recipients() []string {
+// Recipients returns the full SMTP RCPT TO set: To ∪ Cc ∪ Bcc.
+func (m Message) Recipients() []string {
 	out := make([]string, 0, len(m.To)+len(m.Cc)+len(m.Bcc))
 	out = append(out, m.To...)
 	out = append(out, m.Cc...)
 	out = append(out, m.Bcc...)
 	return out
+}
+
+// Bytes renders m into RFC 5322 message bytes (headers plus body), ready to
+// be handed to a Transport for delivery. See buildMIME for the MIME
+// structure it produces.
+func (m Message) Bytes() ([]byte, error) {
+	return buildMIME(m)
 }
