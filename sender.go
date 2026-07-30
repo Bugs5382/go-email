@@ -39,6 +39,12 @@ type Sender interface {
 	// Subject/HTML/Text body, applies it to a copy of m, and sends that
 	// copy via Send.
 	SendKind(ctx context.Context, kind string, m Message, data any) error
+	// SendBulk resolves kind and each Recipient's Data via the configured
+	// Renderer into a copy of base addressed to that one recipient, and
+	// sends every copy through the same path Send uses. A per-recipient
+	// failure or suppression is tallied in the returned BulkResult rather
+	// than aborting the rest of the batch.
+	SendBulk(ctx context.Context, kind string, base Message, recipients []Recipient, opts ...BulkOption) (BulkResult, error)
 }
 
 // Option configures a Sender built by New.
