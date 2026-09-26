@@ -76,7 +76,8 @@ func (e TransientError) Unwrap() error {
 // Validate returns a Middleware that rejects a Message before it reaches the
 // next stage unless: From is a syntactically valid address, there is at
 // least one recipient (To ∪ Cc ∪ Bcc), and every recipient address is
-// syntactically valid. Failures are reported as ErrValidation (wrapped with
+// syntactically valid, and no header value carries CR or LF (see
+// ErrInvalidHeader). Failures are reported as ErrValidation (wrapped with
 // details via errors.Is-compatible wrapping).
 func Validate() Middleware {
 	return func(next SendFunc) SendFunc {
@@ -92,6 +93,9 @@ func Validate() Middleware {
 				if _, err := mail.ParseAddress(addr); err != nil {
 					return fmt.Errorf("%w: recipient %q: %v", ErrValidation, addr, err)
 				}
+			}
+			if err := m.checkHeaders(); err != nil {
+				return fmt.Errorf("%w: %w", ErrValidation, err)
 			}
 			return next(ctx, m)
 		}

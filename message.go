@@ -23,7 +23,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
-import "strings"
+import (
+	"maps"
+	"slices"
+)
 
 // Priority is the RFC 2076-family email priority hint (Importance/X-Priority/
 // Priority headers). The zero value, PriorityNormal, emits no priority
@@ -91,7 +94,10 @@ type headerKV struct{ K, V string }
 // headerLines returns the ordered set of RFC 5322 header key/values derived
 // from the Message's typed fields, for use by the MIME builder. Bcc is
 // intentionally excluded: it is delivered via SMTP RCPT TO only and must
-// never appear in the rendered headers.
+// never appear in the rendered headers. Non-ASCII Subject text and display
+// names are RFC 2047 encoded, and custom headers follow in sorted key order
+// so the output is deterministic. Values are assumed to have passed
+// checkHeaders.
 func (m Message) headerLines() []headerKV {
 	var h []headerKV
 	add := func(k, v string) {
@@ -99,11 +105,11 @@ func (m Message) headerLines() []headerKV {
 			h = append(h, headerKV{k, v})
 		}
 	}
-	add("From", m.From)
-	add("To", strings.Join(m.To, ", "))
-	add("Cc", strings.Join(m.Cc, ", ")) // Bcc intentionally omitted from headers
-	add("Reply-To", m.ReplyTo)
-	add("Subject", m.Subject)
+	add("From", encodeAddressList(m.From))
+	add("To", encodeAddresses(m.To))
+	add("Cc", encodeAddresses(m.Cc)) // Bcc intentionally omitted from headers
+	add("Reply-To", encodeAddressList(m.ReplyTo))
+	add("Subject", encodeUnstructured("Subject", m.Subject))
 	switch m.Priority {
 	case PriorityHigh:
 		add("Importance", "high")
@@ -128,8 +134,8 @@ func (m Message) headerLines() []headerKV {
 	}
 	add("List-Unsubscribe", m.ListUnsubscribe)
 	add("List-Unsubscribe-Post", m.ListUnsubscribePost)
-	for k, v := range m.Headers {
-		add(k, v) // custom headers last
+	for _, k := range slices.Sorted(maps.Keys(m.Headers)) {
+		add(k, m.Headers[k]) // custom headers last, sorted
 	}
 	return h
 }
