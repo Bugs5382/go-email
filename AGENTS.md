@@ -19,6 +19,12 @@ an optional STARTTLS+auth relay path and a plaintext no-auth path for local catc
 - `Bcc` recipients are envelope-only (SMTP `RCPT TO`) and must never be written to a message header.
 - When both `HTML` and `Text` are set on a message, it renders as `multipart/alternative`: the
   plaintext body is a first-class fallback, not an afterthought.
+- `Message.Bytes` rejects a CR or LF in any header value, attachment filename, content type, or
+  Content-ID with `ErrInvalidHeader` (and `Validate` reports it too), so header injection is
+  impossible. Non-ASCII Subject text and display names are RFC 2047 encoded, non-ASCII filenames
+  use RFC 2231 plus an RFC 2047 fallback, custom headers render in sorted order, and `Date` and
+  `Message-ID` are generated unless set in `Headers`. `Content-Type`,
+  `Content-Transfer-Encoding` and `MIME-Version` cannot be set through `Headers`.
 - The core package stays telemetry-free; OpenTelemetry integration lives only in an `email/otel`
   subpackage, imported separately.
 

@@ -61,6 +61,14 @@ type builtPart struct {
 // Non-inline attachments then wrap the result (or the plain body, if there
 // were no inline attachments) in multipart/mixed.
 func buildMIME(m Message) ([]byte, error) {
+	if err := m.checkHeaders(); err != nil {
+		return nil, err
+	}
+	generated, err := m.generatedHeaders()
+	if err != nil {
+		return nil, err
+	}
+
 	part, err := buildBodyPart(m)
 	if err != nil {
 		return nil, fmt.Errorf("build body part: %w", err)
@@ -88,7 +96,7 @@ func buildMIME(m Message) ([]byte, error) {
 		}
 	}
 
-	return renderMessage(m, part), nil
+	return renderMessage(append(generated, m.headerLines()...), part), nil
 }
 
 // buildBodyPart computes the innermost body layer: multipart/alternative
@@ -139,10 +147,7 @@ func buildAttachmentPart(a Attachment, disposition string) builtPart {
 	if disposition == "inline" {
 		extra = append(extra, headerKV{"Content-ID", "<" + a.ContentID + ">"})
 	}
-	extra = append(extra, headerKV{
-		"Content-Disposition",
-		fmt.Sprintf(`%s; filename="%s"`, disposition, a.Filename),
-	})
+	extra = append(extra, headerKV{"Content-Disposition", dispositionValue(disposition, a.Filename)})
 
 	return builtPart{
 		contentType:      ct,
@@ -216,12 +221,12 @@ func combineParts(subtype string, parts []builtPart) (builtPart, error) {
 	}, nil
 }
 
-// renderMessage writes the full RFC 5322 message: the header lines derived
-// from m, MIME-Version and Content-Type (plus Content-Transfer-Encoding when
+// renderMessage writes the full RFC 5322 message: the given header lines,
+// MIME-Version and Content-Type (plus Content-Transfer-Encoding when
 // part is a single, non-multipart body), a blank line, and the body.
-func renderMessage(m Message, part builtPart) []byte {
+func renderMessage(headers []headerKV, part builtPart) []byte {
 	var buf bytes.Buffer
-	for _, kv := range m.headerLines() {
+	for _, kv := range headers {
 		fmt.Fprintf(&buf, "%s: %s\r\n", kv.K, kv.V)
 	}
 	buf.WriteString("MIME-Version: 1.0\r\n")
