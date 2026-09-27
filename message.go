@@ -80,6 +80,18 @@ type Message struct {
 	ListUnsubscribe, ListUnsubscribePost string
 
 	Meta map[string]any
+
+	// Body, when non-nil, is rendered as the message body in place of the
+	// entity built from HTML, Text and Attachments (which are then
+	// ignored). Signers and Encryptors set it to the signed or encrypted
+	// entity; see Entity and Part.
+	Body *Part
+
+	// EnvelopeTo, when non-empty, is the SMTP RCPT TO set, overriding
+	// To ∪ Cc ∪ Bcc in Recipients. The To and Cc headers are still written
+	// from To and Cc. SplitBcc uses it to deliver a copy to one Bcc
+	// recipient while keeping the visible headers intact.
+	EnvelopeTo []string
 }
 
 // Rendered is the resolved subject/HTML/text content produced by a Renderer,
@@ -140,13 +152,37 @@ func (m Message) headerLines() []headerKV {
 	return h
 }
 
-// Recipients returns the full SMTP RCPT TO set: To ∪ Cc ∪ Bcc.
+// Recipients returns the full SMTP RCPT TO set: EnvelopeTo when it is
+// non-empty, otherwise To ∪ Cc ∪ Bcc.
 func (m Message) Recipients() []string {
+	if len(m.EnvelopeTo) > 0 {
+		return slices.Clone(m.EnvelopeTo)
+	}
 	out := make([]string, 0, len(m.To)+len(m.Cc)+len(m.Bcc))
 	out = append(out, m.To...)
 	out = append(out, m.Cc...)
 	out = append(out, m.Bcc...)
 	return out
+}
+
+// clone returns a copy of m whose slices and maps are its own, so a hook can
+// modify the copy without touching m. Attachment contents and the Body bytes
+// are shared: hooks replace them rather than editing them in place.
+func (m Message) clone() Message {
+	c := m
+	c.To = slices.Clone(m.To)
+	c.Cc = slices.Clone(m.Cc)
+	c.Bcc = slices.Clone(m.Bcc)
+	c.EnvelopeTo = slices.Clone(m.EnvelopeTo)
+	c.Attachments = slices.Clone(m.Attachments)
+	c.Headers = maps.Clone(m.Headers)
+	c.Meta = maps.Clone(m.Meta)
+	if m.Body != nil {
+		b := *m.Body
+		b.Headers = slices.Clone(m.Body.Headers)
+		c.Body = &b
+	}
+	return c
 }
 
 // Bytes renders m into RFC 5322 message bytes (headers plus body), ready to

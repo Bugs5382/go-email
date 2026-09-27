@@ -59,12 +59,17 @@ type Suppressor interface {
 	Suppressed(ctx context.Context, addr string) (bool, error)
 }
 
-// Signer applies a message signature (e.g. DKIM) to m before it is sent.
+// Signer signs m before it is sent, typically by replacing m.Body with a
+// signed entity (S/MIME or PGP/MIME) built from m.Entity(). The Sign
+// middleware hands it a private copy of the message, so it may modify m
+// freely. DKIM belongs to the relay, not to this hook.
 type Signer interface {
 	Sign(ctx context.Context, m *Message) error
 }
 
-// Encryptor encrypts m (or parts of it) before it is sent.
+// Encryptor encrypts m before it is sent, typically by replacing m.Body
+// with an encrypted entity for m.Recipients(). The Encrypt middleware hands
+// it a private copy of the message, so it may modify m freely.
 type Encryptor interface {
 	Encrypt(ctx context.Context, m *Message) error
 }
@@ -169,7 +174,7 @@ func Record(r Recorder) Middleware {
 }
 
 // Suppress returns a Middleware that removes addresses reported as
-// suppressed by s from To, Cc, and Bcc before calling next. It is typically
+// suppressed by s from To, Cc, Bcc and EnvelopeTo before calling next. It is typically
 // placed ahead of bulk sends to honor bounce or unsubscribe lists. If
 // filtering leaves no recipient at all, it returns ErrSuppressed without
 // calling next, rather than attempting a send with zero recipients.
@@ -204,8 +209,17 @@ func Suppress(s Suppressor) Middleware {
 			if err != nil {
 				return err
 			}
-			m.To, m.Cc, m.Bcc = to, cc, bcc
-			if len(to)+len(cc)+len(bcc) == 0 {
+			env, err := filter(ctx, m.EnvelopeTo)
+			if err != nil {
+				return err
+			}
+			// An emptied EnvelopeTo must stay non-nil-and-empty in effect:
+			// dropping it would silently widen delivery to To, Cc and Bcc.
+			if len(m.EnvelopeTo) > 0 && len(env) == 0 {
+				return ErrSuppressed
+			}
+			m.To, m.Cc, m.Bcc, m.EnvelopeTo = to, cc, bcc, env
+			if len(m.Recipients()) == 0 {
 				return ErrSuppressed
 			}
 			return next(ctx, m)
@@ -213,34 +227,75 @@ func Suppress(s Suppressor) Middleware {
 	}
 }
 
-// Sign returns a Middleware that calls s.Sign on m before next. If s is nil,
-// the returned Middleware is the identity: it calls next unchanged.
+// Sign returns a Middleware that calls s.Sign on a copy of m and passes the
+// signed copy to next. m itself is never modified, so a Retry placed outside
+// Sign re-signs the original message on every attempt instead of signing an
+// already-signed one. If s is nil, the returned Middleware is the identity.
 func Sign(s Signer) Middleware {
 	return func(next SendFunc) SendFunc {
 		return func(ctx context.Context, m *Message) error {
 			if s == nil {
 				return next(ctx, m)
 			}
-			if err := s.Sign(ctx, m); err != nil {
+			c := m.clone()
+			if err := s.Sign(ctx, &c); err != nil {
 				return err
 			}
-			return next(ctx, m)
+			return next(ctx, &c)
 		}
 	}
 }
 
-// Encrypt returns a Middleware that calls e.Encrypt on m before next. If e is
-// nil, the returned Middleware is the identity: it calls next unchanged.
+// Encrypt returns a Middleware that calls e.Encrypt on a copy of m and
+// passes the encrypted copy to next, leaving m unchanged (see Sign). If e is
+// nil, the returned Middleware is the identity.
 func Encrypt(e Encryptor) Middleware {
 	return func(next SendFunc) SendFunc {
 		return func(ctx context.Context, m *Message) error {
 			if e == nil {
 				return next(ctx, m)
 			}
-			if err := e.Encrypt(ctx, m); err != nil {
+			c := m.clone()
+			if err := e.Encrypt(ctx, &c); err != nil {
 				return err
 			}
-			return next(ctx, m)
+			return next(ctx, &c)
+		}
+	}
+}
+
+// SplitBcc returns a Middleware that sends Bcc recipients their own copies:
+// one copy to To ∪ Cc with Bcc cleared, then one copy per Bcc address with
+// Bcc and EnvelopeTo set to just that address. The To and Cc headers are the
+// same on every copy. Place it outside Encrypt, so an encrypted copy lists
+// only its own recipients' keys and never reveals who else was Bcc'd.
+//
+// Every copy is attempted even if an earlier one fails, and the failures are
+// joined with errors.Join. A Retry placed outside SplitBcc would resend every
+// copy, so put Retry inside it. Each copy gets its own generated Message-ID
+// unless Headers sets one. A message without Bcc passes through unchanged.
+func SplitBcc() Middleware {
+	return func(next SendFunc) SendFunc {
+		return func(ctx context.Context, m *Message) error {
+			if len(m.Bcc) == 0 {
+				return next(ctx, m)
+			}
+			var errs []error
+			if len(m.To)+len(m.Cc) > 0 {
+				c := m.clone()
+				c.Bcc, c.EnvelopeTo = nil, nil
+				if err := next(ctx, &c); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			for _, addr := range m.Bcc {
+				c := m.clone()
+				c.Bcc, c.EnvelopeTo = []string{addr}, []string{addr}
+				if err := next(ctx, &c); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			return errors.Join(errs...)
 		}
 	}
 }
