@@ -448,3 +448,76 @@ func FuzzQuotedPrintable(f *testing.F) {
 func normaliseNewlines(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\n", "\r\n")
 }
+
+// splitEnc is a SplitEncryptor test double: it returns one copy per
+// recipient and fails the copy for fail@example.com at send time.
+type splitEnc struct{ calls int }
+
+func (s *splitEnc) Encrypt(context.Context, *Message) error {
+	return errors.New("Encrypt must not be called when EncryptCopies exists")
+}
+
+func (s *splitEnc) EncryptCopies(_ context.Context, m *Message) ([]Message, error) {
+	s.calls++
+	var out []Message
+	for _, r := range m.Recipients() {
+		c := m.clone()
+		c.EnvelopeTo = []string{r}
+		c.Body = &Part{ContentType: "application/octet-stream", Body: []byte(r)}
+		m.To[0] = "mutated@example.com" // must not reach the caller
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func TestEncryptSendsEveryCopyOfASplitEncryptor(t *testing.T) {
+	t.Parallel()
+
+	errFail := errors.New("fail")
+	var sent []string
+	base := func(_ context.Context, m *Message) error {
+		sent = append(sent, strings.Join(m.Recipients(), ","))
+		if slices.Contains(m.Recipients(), "fail@example.com") {
+			return errFail
+		}
+		return nil
+	}
+	m := baseMsg()
+	m.Cc = []string{"fail@example.com", "c@example.com"}
+	enc := &splitEnc{}
+	err := chain(base, Encrypt(enc))(context.Background(), &m)
+	if !errors.Is(err, errFail) {
+		t.Fatalf("err = %v, want the failed copy's error", err)
+	}
+	if !slices.Equal(sent, []string{"b@example.com", "fail@example.com", "c@example.com"}) {
+		t.Errorf("sent %v, want every copy attempted in order", sent)
+	}
+	if enc.calls != 1 || m.To[0] != "b@example.com" || m.Body != nil {
+		t.Error("the caller's message must not change")
+	}
+}
+
+func TestEncryptSplitEncryptorError(t *testing.T) {
+	t.Parallel()
+
+	boom := errors.New("boom")
+	enc := struct {
+		encryptorFunc
+		copiesFunc
+	}{
+		encryptorFunc(func(context.Context, *Message) error { return nil }),
+		copiesFunc(func(context.Context, *Message) ([]Message, error) { return nil, boom }),
+	}
+	called := false
+	base := func(context.Context, *Message) error { called = true; return nil }
+	m := baseMsg()
+	if err := chain(base, Encrypt(enc))(context.Background(), &m); !errors.Is(err, boom) || called {
+		t.Errorf("err = %v, called = %v", err, called)
+	}
+}
+
+type copiesFunc func(context.Context, *Message) ([]Message, error)
+
+func (f copiesFunc) EncryptCopies(ctx context.Context, m *Message) ([]Message, error) {
+	return f(ctx, m)
+}

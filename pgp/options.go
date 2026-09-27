@@ -60,8 +60,9 @@ const (
 	MissingKeyFail MissingKeyPolicy = iota
 	// MissingKeyPlaintext sends recipients without a key a separate
 	// plaintext copy (still signed when SignEncrypt has a signing key).
-	// A bare Encryptor cannot split a message, so it only leaves the
-	// message in plaintext when no recipient has a key at all.
+	// A bare Encryptor splits the same way when used through
+	// email.Encrypt; its Encrypt method alone cannot split, so it fails
+	// when only some recipients lack a key.
 	MissingKeyPlaintext
 )
 

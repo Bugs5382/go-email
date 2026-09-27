@@ -30,6 +30,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -398,5 +399,129 @@ func TestDecryptErrorsAreUniform(t *testing.T) {
 	}
 	if _, err := Decrypt(context.Background(), raw, testKey(t, "Eve", "eve@example.com"), nil); err != ErrDecrypt { //nolint:errorlint // must be the bare sentinel
 		t.Errorf("wrong key: err = %v, want bare ErrDecrypt", err)
+	}
+}
+
+// TestEncryptorSplitsForMissingKeys covers MissingKeyPlaintext on a bare
+// Encryptor used through email.Encrypt: recipients with keys get one
+// encrypted copy, and only the recipients without a key get plaintext.
+func TestEncryptorSplitsForMissingKeys(t *testing.T) {
+	t.Parallel()
+
+	alice := testKey(t, "Alice", "alice@example.com")
+	bob := testKey(t, "Bob", "bob@example.com")
+	dave := testKey(t, "Dave", "dave@example.com")
+	store := NewMemStore(publicOnly(t, bob), publicOnly(t, dave))
+	enc, err := NewEncryptor(store, WithMissingKey(MissingKeyPlaintext), WithEncryptToSelf(publicOnly(t, alice)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(m email.Message) ([]email.Message, error) {
+		var out sink
+		err := email.Encrypt(enc)(out.send)(context.Background(), &m)
+		return out.msgs, err
+	}
+
+	m := testMessage()
+	m.To = []string{"bob@example.com", "carol@example.com"}
+	m.Cc = []string{"Dave <dave@example.com>", "erin@example.com"}
+	got, err := send(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d copies, want 2", len(got))
+	}
+	if r := got[0].Recipients(); !slices.Equal(r, []string{"bob@example.com", "dave@example.com"}) {
+		t.Errorf("encrypted copy recipients = %v", r)
+	}
+	encRaw := render(t, got[0])
+	for _, k := range []*Key{bob, dave, alice} {
+		if _, err := Decrypt(context.Background(), encRaw, k, nil); err != nil {
+			t.Errorf("encrypted copy unreadable by %s: %v", k.Emails()[0], err)
+		}
+	}
+	if bytes.Contains(encRaw, []byte("numbers are in")) {
+		t.Error("encrypted copy leaks the plaintext")
+	}
+	if r := got[1].Recipients(); !slices.Equal(r, []string{"carol@example.com", "erin@example.com"}) {
+		t.Errorf("plaintext copy recipients = %v", r)
+	}
+	if got[1].Body != nil || got[1].Text != m.Text {
+		t.Error("the plaintext copy must be the original, unencrypted message")
+	}
+	for _, c := range got {
+		if !slices.Equal(c.To, m.To) || !slices.Equal(c.Cc, m.Cc) {
+			t.Error("every copy keeps the visible To and Cc headers")
+		}
+	}
+	if m.Body != nil || m.EnvelopeTo != nil {
+		t.Error("the caller's message must not change")
+	}
+
+	// Every recipient has a key: one encrypted copy, as before.
+	m = testMessage()
+	m.To = []string{"bob@example.com", "dave@example.com"}
+	if got, err := send(m); err != nil || len(got) != 1 || got[0].Body == nil {
+		t.Errorf("all keyed: %d copies, %v", len(got), err)
+	}
+	// No recipient has a key: one plaintext copy.
+	m = testMessage()
+	m.To = []string{"carol@example.com"}
+	if got, err := send(m); err != nil || len(got) != 1 || got[0].Body != nil {
+		t.Errorf("none keyed: %d copies, %v", len(got), err)
+	}
+
+	// The default policy still fails closed and sends nothing.
+	strict, _ := NewEncryptor(store)
+	var out sink
+	m = testMessage()
+	m.To = []string{"bob@example.com", "carol@example.com"}
+	if err := email.Encrypt(strict)(out.send)(context.Background(), &m); !errors.Is(err, ErrNoRecipientKey) || len(out.msgs) != 0 {
+		t.Errorf("MissingKeyFail: err=%v sent=%d", err, len(out.msgs))
+	}
+
+	// Calling Encrypt directly cannot split, so a partial miss still fails.
+	m = testMessage()
+	m.To = []string{"bob@example.com", "carol@example.com"}
+	var mk *MissingKeyError
+	if err := enc.Encrypt(context.Background(), &m); !errors.As(err, &mk) || !slices.Equal(mk.Addrs, []string{"carol@example.com"}) {
+		t.Errorf("direct Encrypt with a partial miss: err = %v", err)
+	}
+}
+
+// TestEncryptorSplitKeepsBccRules checks that splitting for missing keys
+// does not change the Bcc rules: a shared copy with Bcc is still refused,
+// and with BccAllow the Bcc field follows each address to its copy.
+func TestEncryptorSplitKeepsBccRules(t *testing.T) {
+	t.Parallel()
+
+	bob := testKey(t, "Bob", "bob@example.com")
+	store := NewMemStore(publicOnly(t, bob))
+	enc, _ := NewEncryptor(store, WithMissingKey(MissingKeyPlaintext))
+	var out sink
+	m := testMessage()
+	m.To = []string{"bob@example.com"}
+	m.Bcc = []string{"carol@example.com"}
+	if err := email.Encrypt(enc)(out.send)(context.Background(), &m); !errors.Is(err, ErrBccNotSplit) || len(out.msgs) != 0 {
+		t.Errorf("shared Bcc copy: err=%v sent=%d", err, len(out.msgs))
+	}
+
+	allow, _ := NewEncryptor(store, WithMissingKey(MissingKeyPlaintext), WithBccPolicy(BccAllow))
+	out = sink{}
+	if err := email.Encrypt(allow)(out.send)(context.Background(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.msgs) != 2 {
+		t.Fatalf("got %d copies, want 2", len(out.msgs))
+	}
+	if c := out.msgs[0]; !slices.Equal(c.Recipients(), []string{"bob@example.com"}) || len(c.Bcc) != 0 || c.Body == nil {
+		t.Errorf("encrypted copy: rcpt=%v bcc=%v", c.Recipients(), c.Bcc)
+	}
+	if c := out.msgs[1]; !slices.Equal(c.Recipients(), []string{"carol@example.com"}) || !slices.Equal(c.Bcc, []string{"carol@example.com"}) || c.Body != nil {
+		t.Errorf("plaintext copy: rcpt=%v bcc=%v", c.Recipients(), c.Bcc)
+	}
+	if raw := render(t, out.msgs[1]); bytes.Contains(raw, []byte("carol@example.com")) {
+		t.Error("a Bcc address must never be written to a header")
 	}
 }

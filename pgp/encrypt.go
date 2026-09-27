@@ -40,14 +40,14 @@ import (
 	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 )
 
-// encryptor is the email.Encryptor NewEncryptor returns, and the engine
+// encryptor is the email.SplitEncryptor NewEncryptor returns, and the engine
 // behind SignEncrypt.
 type encryptor struct {
 	store KeyStore
 	o     *options
 }
 
-// NewEncryptor returns an email.Encryptor that replaces the message body
+// NewEncryptor returns an email.SplitEncryptor that replaces the message body
 // with a PGP/MIME multipart/encrypted entity (RFC 3156 section 4), encrypted
 // to one valid key per recipient in m.Recipients(), looked up in store, plus
 // any WithEncryptToSelf keys.
@@ -56,7 +56,9 @@ type encryptor struct {
 // subkey, a validly self-signed user ID matching the address, and is not
 // weak. When several match, the newest is used. A recipient without one
 // fails the message with a *MissingKeyError unless
-// WithMissingKey(MissingKeyPlaintext) is set.
+// WithMissingKey(MissingKeyPlaintext) is set. In that case, used through
+// email.Encrypt, recipients with keys get one encrypted copy and the rest
+// get a separate plaintext copy (see EncryptCopies).
 //
 // The encrypted data is SEIPDv2 (AEAD) when every recipient key advertises
 // support for it, and SEIPDv1 with a modification detection code otherwise.
@@ -65,7 +67,7 @@ type encryptor struct {
 // One encrypted copy lists every recipient's key ID, so a message with Bcc
 // recipients and more than one recipient returns ErrBccNotSplit, unless
 // WithBccPolicy(BccAllow) is set. SignEncrypt splits Bcc copies itself.
-func NewEncryptor(store KeyStore, opts ...Option) (email.Encryptor, error) {
+func NewEncryptor(store KeyStore, opts ...Option) (email.SplitEncryptor, error) {
 	return newEncryptor(store, opts)
 }
 
@@ -91,41 +93,134 @@ func newEncryptor(store KeyStore, opts []Option) (*encryptor, error) {
 	return &encryptor{store: store, o: o}, nil
 }
 
-// Encrypt implements email.Encryptor.
+// Encrypt implements email.Encryptor. It can only change m, so it cannot
+// split a message: when WithMissingKey(MissingKeyPlaintext) is set and only
+// some recipients lack a key, it returns a *MissingKeyError. Used through
+// email.Encrypt, the Encryptor calls EncryptCopies instead, which splits.
 func (e *encryptor) Encrypt(ctx context.Context, m *email.Message) error {
+	start := time.Now()
+	plan, err := e.prepare(ctx, m)
+	if err != nil {
+		return err
+	}
+	if len(plan.missing) > 0 && len(plan.keys) > 0 {
+		e.o.log.Ctx(ctx).Warn("pgp: some recipients have no key and Encrypt cannot split; use email.Encrypt",
+			log.F("missing", addrIDs(plan.missing)))
+		return &MissingKeyError{Addrs: plan.missing}
+	}
+	return e.encryptWhole(ctx, m, plan, start)
+}
+
+// EncryptCopies implements email.SplitEncryptor, so email.Encrypt calls it
+// instead of Encrypt. With WithMissingKey(MissingKeyPlaintext) and only
+// some recipients lacking a key, it returns two copies: one encrypted to
+// the recipients with keys, then one plaintext copy for the rest. Both
+// keep the To and Cc headers, and EnvelopeTo limits delivery. Otherwise it
+// returns the single copy Encrypt would produce.
+func (e *encryptor) EncryptCopies(ctx context.Context, m *email.Message) ([]email.Message, error) {
 	l := e.o.log.Ctx(ctx)
 	start := time.Now()
+	plan, err := e.prepare(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	if len(plan.missing) == 0 || len(plan.keys) == 0 {
+		if err := e.encryptWhole(ctx, m, plan, start); err != nil {
+			return nil, err
+		}
+		return []email.Message{*m}, nil
+	}
+
+	bcc := map[string]bool{}
+	for _, a := range uniqueAddrs(m.Bcc) {
+		bcc[a] = true
+	}
+	var keyed []string
+	for _, a := range plan.addrs {
+		if plan.keys[a] != nil {
+			keyed = append(keyed, a)
+		}
+	}
+	split := func(addrs []string) email.Message {
+		c := cloneMessage(*m)
+		c.EnvelopeTo = slices.Clone(addrs)
+		c.Bcc = nil
+		for _, a := range addrs {
+			if bcc[a] {
+				c.Bcc = append(c.Bcc, a)
+			}
+		}
+		return c
+	}
+
+	ent, err := m.Entity()
+	if err != nil {
+		return nil, fmt.Errorf("pgp: %w", err)
+	}
+	p, err := e.encryptPart(ctx, ent.Bytes(), plan.keys, nil)
+	if err != nil {
+		return nil, err
+	}
+	encCopy := split(keyed)
+	setEncryptedBody(&encCopy, p)
+	plainCopy := split(plan.missing)
+	l.Warn("pgp: sending a plaintext copy to recipients without a key",
+		log.F("missing", addrIDs(plan.missing)), log.F("encrypted_recipients", len(keyed)))
+	l.Debug("pgp: message split and encrypted", log.F("copies", 2), since(start))
+	return []email.Message{encCopy, plainCopy}, nil
+}
+
+// encryptPlan is what prepare found: the unique recipient addresses, one
+// key per address that has one, and the addresses without one.
+type encryptPlan struct {
+	addrs   []string
+	keys    map[string]*Key
+	missing []string
+}
+
+// prepare runs the checks shared by Encrypt and EncryptCopies and looks up
+// every recipient's key. With MissingKeyFail, any missing key is an error.
+func (e *encryptor) prepare(ctx context.Context, m *email.Message) (*encryptPlan, error) {
+	l := e.o.log.Ctx(ctx)
 	if isEncryptedBody(m.Body) {
 		l.Warn("pgp: body already encrypted")
-		return ErrAlreadyEncrypted
+		return nil, ErrAlreadyEncrypted
 	}
 	rcpts := m.Recipients()
 	l.Debug("pgp: encrypting message", log.F("recipients", len(rcpts)), log.F("bcc", len(m.Bcc)))
 	if len(rcpts) == 0 {
-		return errors.New("pgp: message has no recipients")
+		return nil, errors.New("pgp: message has no recipients")
 	}
 	if len(m.Bcc) > 0 && len(rcpts) > 1 && e.o.bcc != BccAllow {
 		l.Warn("pgp: refusing to encrypt Bcc recipients into a shared copy", log.F("recipients", len(rcpts)))
-		return ErrBccNotSplit
+		return nil, ErrBccNotSplit
 	}
 	addrs := uniqueAddrs(rcpts)
 	keys, missing, err := e.resolve(ctx, addrs)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if len(missing) > 0 {
-		if e.o.missing == MissingKeyPlaintext && len(missing) == len(addrs) {
-			l.Warn("pgp: no recipient has a key; sending plaintext as configured", log.F("missing", addrIDs(missing)))
-			return nil
-		}
+	if len(missing) > 0 && e.o.missing != MissingKeyPlaintext {
 		l.Warn("pgp: recipients without a valid key", log.F("missing", addrIDs(missing)))
-		return &MissingKeyError{Addrs: missing}
+		return nil, &MissingKeyError{Addrs: missing}
+	}
+	return &encryptPlan{addrs: addrs, keys: keys, missing: missing}, nil
+}
+
+// encryptWhole encrypts m in place for every recipient, or leaves it in
+// plaintext when no recipient has a key (only reachable with
+// MissingKeyPlaintext).
+func (e *encryptor) encryptWhole(ctx context.Context, m *email.Message, plan *encryptPlan, start time.Time) error {
+	l := e.o.log.Ctx(ctx)
+	if len(plan.keys) == 0 {
+		l.Warn("pgp: no recipient has a key; sending plaintext as configured", log.F("missing", addrIDs(plan.missing)))
+		return nil
 	}
 	ent, err := m.Entity()
 	if err != nil {
 		return fmt.Errorf("pgp: %w", err)
 	}
-	p, err := e.encryptPart(ctx, ent.Bytes(), keys, nil)
+	p, err := e.encryptPart(ctx, ent.Bytes(), plan.keys, nil)
 	if err != nil {
 		return err
 	}

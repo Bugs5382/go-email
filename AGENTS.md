@@ -31,6 +31,9 @@ an optional STARTTLS+auth relay path and a plaintext no-auth path for local catc
   (`encodeQP` in `part.go`), which also escapes `From ` at the start of a line.
 - `Sign` and `Encrypt` hand the hook a deep-enough copy (`Message.clone`) and pass that copy on,
   so the caller's message and any outer middleware (Retry, Record) never see the hook's changes.
+- `Encrypt` checks whether its Encryptor is also a `SplitEncryptor`. If so, it calls
+  `EncryptCopies` and sends every copy it returns, attempting all of them and joining the errors.
+  `pgp`'s Encryptor uses this to split off a plaintext copy for recipients without a key.
 - `SplitBcc` sends one copy to To+Cc and one per Bcc address, using `Message.EnvelopeTo` to limit
   RCPT TO while keeping the To/Cc headers. Put it outside `Encrypt` and put `Retry` inside it.
 - The core package stays telemetry-free; OpenTelemetry integration lives only in an `email/otel`
@@ -40,7 +43,8 @@ an optional STARTTLS+auth relay path and a plaintext no-auth path for local catc
   it. No go-crypto type appears in the exported API: keys are the opaque `*pgp.Key`, and a `Key`
   formats and logs as its fingerprint only. The rules it enforces: sign before encrypt
   (`ErrAlreadyEncrypted`), the signing key must own the From address, a missing recipient key
-  fails closed (`MissingKeyError`) unless `MissingKeyPlaintext` is set, `SignEncrypt` gives each
+  fails closed (`MissingKeyError`) unless `MissingKeyPlaintext` is set (then both `SignEncrypt` and
+  the bare Encryptor, through `email.Encrypt`, send keyless recipients a separate plaintext copy), `SignEncrypt` gives each
   Bcc recipient a separate copy and a bare `Encryptor` refuses a shared Bcc copy, and RSA under
   2048 bits, DSA and ElGamal are refused. `Verify` and `Decrypt` only trust a signature by a key
   bound to the single From address; `Decrypt` only opens a top-level two-part

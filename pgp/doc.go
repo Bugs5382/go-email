@@ -4,7 +4,8 @@
 // Sending plugs into the email middleware chain. NewSigner returns an
 // email.Signer that wraps the message body in multipart/signed with a
 // detached signature. NewEncryptor returns an email.Encryptor that wraps it
-// in multipart/encrypted. SignEncrypt returns one middleware that signs and
+// in multipart/encrypted, splitting off a plaintext copy for recipients
+// without a key when MissingKeyPlaintext is set. SignEncrypt returns one middleware that signs and
 // encrypts in a single OpenPGP message (RFC 3156 section 6.2), always in
 // that order, and gives every Bcc recipient a separate copy so no reader
 // learns who else was Bcc'd:
