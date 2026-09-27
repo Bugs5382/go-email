@@ -30,7 +30,12 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Test
-        run: go test ./... -cover
+        run: go test -race ./... -cover
+      - name: GnuPG interop
+        # Round-trips PGP/MIME through the runner's gpg in both directions.
+        run: |
+          gpg --version | head -n 1
+          go test -tags interop -run Interop -v ./pgp/
   lint:
     name: GolangCI
     runs-on: ubuntu-latest

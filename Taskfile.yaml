@@ -26,6 +26,10 @@ tasks:
     desc: Run tests
     cmds:
       - go test -parallel {{.TESTPARALLELISM}} ./...
+  interop:
+    desc: Round-trip PGP/MIME through a local gpg (needs gpg on PATH)
+    cmds:
+      - go test -tags interop -run Interop -v ./pgp/
   test-cover:
     desc: Run tests with coverage reporting
     cmds:
