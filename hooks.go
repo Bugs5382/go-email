@@ -74,6 +74,19 @@ type Encryptor interface {
 	Encrypt(ctx context.Context, m *Message) error
 }
 
+// SplitEncryptor is an Encryptor that may need to deliver one message as
+// several copies, for example an encrypted copy for recipients with keys and
+// a plaintext copy for the rest. When the Encryptor given to Encrypt also
+// implements SplitEncryptor, Encrypt calls EncryptCopies instead of Encrypt
+// and sends every copy it returns.
+type SplitEncryptor interface {
+	Encryptor
+	// EncryptCopies returns the copies to send, each with its own
+	// recipients (usually set through EnvelopeTo). It gets a private copy of
+	// the message, so it may modify m freely.
+	EncryptCopies(ctx context.Context, m *Message) ([]Message, error)
+}
+
 // recorderFunc adapts a plain function to a Recorder, mirroring the
 // http.HandlerFunc idiom so tests and simple callers can supply a Recorder
 // without declaring a named type.
@@ -249,6 +262,10 @@ func Sign(s Signer) Middleware {
 // Encrypt returns a Middleware that calls e.Encrypt on a copy of m and
 // passes the encrypted copy to next, leaving m unchanged (see Sign). If e is
 // nil, the returned Middleware is the identity.
+//
+// If e is a SplitEncryptor, Encrypt calls EncryptCopies and passes each copy
+// to next in order. Every copy is attempted even if an earlier one fails,
+// and the failures are joined with errors.Join, as in SplitBcc.
 func Encrypt(e Encryptor) Middleware {
 	return func(next SendFunc) SendFunc {
 		return func(ctx context.Context, m *Message) error {
@@ -256,6 +273,19 @@ func Encrypt(e Encryptor) Middleware {
 				return next(ctx, m)
 			}
 			c := m.clone()
+			if se, ok := e.(SplitEncryptor); ok {
+				copies, err := se.EncryptCopies(ctx, &c)
+				if err != nil {
+					return err
+				}
+				var errs []error
+				for i := range copies {
+					if err := next(ctx, &copies[i]); err != nil {
+						errs = append(errs, err)
+					}
+				}
+				return errors.Join(errs...)
+			}
 			if err := e.Encrypt(ctx, &c); err != nil {
 				return err
 			}

@@ -73,8 +73,9 @@ handing it to the `Transport`:
   caller-supplied `Recorder`.
 - `Suppress(Suppressor)` -- skips recipients on a caller-supplied suppression
   list, returning `ErrSuppressed` when every recipient is suppressed.
-- `Sign(Signer)` / `Encrypt(Encryptor)` -- hook seams for a caller-supplied
-  S/MIME, PGP, or other signing/encryption implementation.
+- `Sign(Signer)` / `Encrypt(Encryptor)` -- hook seams for signing and
+  encryption, such as the [`pgp`](pgp) subpackage or your own S/MIME
+  implementation.
 
 `SendBulk` sends one rendered `Message` per recipient through the same
 middleware chain, with per-recipient throttling and a `BulkResult` tally
@@ -92,6 +93,11 @@ instead of aborting the batch on the first failure.
   OpenTelemetry span plus send-count and duration metrics. It is the only
   package in this module that imports `go.opentelemetry.io/otel`; the core
   package stays telemetry-free.
+- [`pgp`](pgp) -- PGP/MIME (RFC 3156): a `Signer`, an `Encryptor`, and a
+  `SignEncrypt` middleware that signs, encrypts, and gives each Bcc
+  recipient its own copy, plus `Verify` and `Decrypt` for inbound mail.
+  Decryption fails closed on any integrity error. Built on
+  `ProtonMail/go-crypto`; logs through `go-log` and is silent by default.
 
 ## 🛠 Develop
 
@@ -101,6 +107,7 @@ task test     # go test ./...
 task lint     # gofmt check + golangci-lint + yamllint
 task ci       # build + vet + lint
 task license  # verify every source file carries the MIT header
+task interop  # round-trip PGP/MIME through a local gpg
 ```
 
 ## ⚖️ License
