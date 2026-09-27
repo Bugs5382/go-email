@@ -83,6 +83,8 @@ later tasks; update it alongside each new file.
 
 - See `CLAUDE.md` for the branch/commit/PR rules; they are enforced by the git hooks in
   `.claude/hooks` (run `bash .claude/hooks/install.sh` once per clone).
+- Open every PR as a draft. CI skips drafts, so run the full checks locally, push once they pass,
+  and mark the PR ready when the work is finished; see CLAUDE.md "CI and Actions minutes".
 - This is a **public** repository: never introduce internal hostnames, service names, or
   organization-specific identifiers. Use generic placeholders (`localhost:1025`,
   `no-reply@example.com`, a `smtp`/`mailhog`-style catcher host) in code, tests, and docs.
