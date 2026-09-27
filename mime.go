@@ -27,29 +27,33 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"mime/multipart"
-	"mime/quotedprintable"
 	"net/http"
-	"net/textproto"
 )
 
 // base64LineLen is the maximum encoded line length for base64 body parts,
 // per RFC 2045 section 6.8.
 const base64LineLen = 76
 
-// builtPart is an already-encoded MIME body fragment, together with the
-// headers needed to describe it -- either as the sole top-level body of the
-// message or as one nested layer inside an outer multipart/* container.
-type builtPart struct {
-	contentType      string
-	transferEncoding string
-	extraHeaders     []headerKV
-	body             []byte
+// buildMIME renders m into RFC 5322 message bytes (headers plus body) using
+// CRLF line endings throughout. The body is m.Entity(): m.Body when set,
+// otherwise a MIME tree derived from the message content (see Entity).
+func buildMIME(m Message) ([]byte, error) {
+	part, err := m.Entity()
+	if err != nil {
+		return nil, err
+	}
+	generated, err := m.generatedHeaders()
+	if err != nil {
+		return nil, err
+	}
+	return renderMessage(append(generated, m.headerLines()...), part), nil
 }
 
-// buildMIME renders m into RFC 5322 message bytes (headers plus body) using
-// CRLF line endings throughout. The body's MIME structure is derived from
-// the message content:
+// Entity returns m's body as a single encoded MIME entity, without the
+// RFC 5322 message headers. When m.Body is set it returns *m.Body. Otherwise
+// the structure is derived from the message content:
 //
 //   - HTML and Text both set -> multipart/alternative (text part first, then
 //     html, so plain-text stays a first-class fallback).
@@ -60,18 +64,22 @@ type builtPart struct {
 // multipart/related so HTML can reference them via "cid:<ContentID>".
 // Non-inline attachments then wrap the result (or the plain body, if there
 // were no inline attachments) in multipart/mixed.
-func buildMIME(m Message) ([]byte, error) {
+//
+// Every nested part is rendered with Part.Bytes, and Bytes embeds the
+// returned entity verbatim, so a signature over Entity().Bytes() stays valid
+// once the entity is placed in a message. Multipart boundaries are random,
+// so two calls return different bytes.
+func (m Message) Entity() (Part, error) {
 	if err := m.checkHeaders(); err != nil {
-		return nil, err
+		return Part{}, err
 	}
-	generated, err := m.generatedHeaders()
-	if err != nil {
-		return nil, err
+	if m.Body != nil {
+		return *m.Body, nil
 	}
 
 	part, err := buildBodyPart(m)
 	if err != nil {
-		return nil, fmt.Errorf("build body part: %w", err)
+		return Part{}, fmt.Errorf("build body part: %w", err)
 	}
 
 	var inline, attached []Attachment
@@ -86,26 +94,25 @@ func buildMIME(m Message) ([]byte, error) {
 	if len(inline) > 0 {
 		part, err = wrapMultipart("related", part, inline, "inline")
 		if err != nil {
-			return nil, fmt.Errorf("wrap multipart/related: %w", err)
+			return Part{}, fmt.Errorf("wrap multipart/related: %w", err)
 		}
 	}
 	if len(attached) > 0 {
 		part, err = wrapMultipart("mixed", part, attached, "attachment")
 		if err != nil {
-			return nil, fmt.Errorf("wrap multipart/mixed: %w", err)
+			return Part{}, fmt.Errorf("wrap multipart/mixed: %w", err)
 		}
 	}
-
-	return renderMessage(append(generated, m.headerLines()...), part), nil
+	return part, nil
 }
 
 // buildBodyPart computes the innermost body layer: multipart/alternative
 // when both HTML and Text are present, otherwise whichever single one of
 // the two is set, falling back to an empty text/plain part.
-func buildBodyPart(m Message) (builtPart, error) {
+func buildBodyPart(m Message) (Part, error) {
 	switch {
 	case m.HTML != "" && m.Text != "":
-		return combineParts("alternative", []builtPart{
+		return combineParts("alternative", []Part{
 			buildTextPart("text/plain", m.Text),
 			buildTextPart("text/html", m.HTML),
 		})
@@ -119,17 +126,13 @@ func buildBodyPart(m Message) (builtPart, error) {
 }
 
 // buildTextPart quoted-printable encodes text as a single part of the given
-// media type (e.g. "text/plain", "text/html").
-func buildTextPart(mediaType, text string) builtPart {
-	var buf bytes.Buffer
-	qw := quotedprintable.NewWriter(&buf)
-	// bytes.Buffer never returns an error from Write/Close.
-	_, _ = qw.Write([]byte(text))
-	_ = qw.Close()
-	return builtPart{
-		contentType:      mediaType + "; charset=utf-8",
-		transferEncoding: "quoted-printable",
-		body:             buf.Bytes(),
+// media type (e.g. "text/plain", "text/html"). See encodeQP for why this
+// does not use mime/quotedprintable.
+func buildTextPart(mediaType, text string) Part {
+	return Part{
+		ContentType:      mediaType + "; charset=utf-8",
+		TransferEncoding: "quoted-printable",
+		Body:             encodeQP(text),
 	}
 }
 
@@ -137,23 +140,23 @@ func buildTextPart(mediaType, text string) builtPart {
 // sniffing its Content-Type when the caller left it empty and tagging it
 // inline (with a Content-ID for "cid:" references) or as a regular
 // attachment per disposition.
-func buildAttachmentPart(a Attachment, disposition string) builtPart {
+func buildAttachmentPart(a Attachment, disposition string) Part {
 	ct := a.ContentType
 	if ct == "" {
 		ct = http.DetectContentType(a.Content)
 	}
 
-	var extra []headerKV
+	var extra []Header
 	if disposition == "inline" {
-		extra = append(extra, headerKV{"Content-ID", "<" + a.ContentID + ">"})
+		extra = append(extra, Header{"Content-ID", "<" + a.ContentID + ">"})
 	}
-	extra = append(extra, headerKV{"Content-Disposition", dispositionValue(disposition, a.Filename)})
+	extra = append(extra, Header{"Content-Disposition", dispositionValue(disposition, a.Filename)})
 
-	return builtPart{
-		contentType:      ct,
-		transferEncoding: "base64",
-		extraHeaders:     extra,
-		body:             encodeBase64Lines(a.Content),
+	return Part{
+		ContentType:      ct,
+		TransferEncoding: "base64",
+		Headers:          extra,
+		Body:             encodeBase64Lines(a.Content),
 	}
 }
 
@@ -175,8 +178,8 @@ func encodeBase64Lines(data []byte) []byte {
 // wrapMultipart wraps body as the first part of a new multipart/subtype
 // container, followed by one part per attachment (each tagged with
 // disposition, "inline" or "attachment").
-func wrapMultipart(subtype string, body builtPart, atts []Attachment, disposition string) (builtPart, error) {
-	parts := make([]builtPart, 0, len(atts)+1)
+func wrapMultipart(subtype string, body Part, atts []Attachment, disposition string) (Part, error) {
+	parts := make([]Part, 0, len(atts)+1)
 	parts = append(parts, body)
 	for _, a := range atts {
 		parts = append(parts, buildAttachmentPart(a, disposition))
@@ -184,57 +187,48 @@ func wrapMultipart(subtype string, body builtPart, atts []Attachment, dispositio
 	return combineParts(subtype, parts)
 }
 
-// combineParts assembles parts into a multipart/subtype body using
-// mime/multipart, which produces RFC 2046 boundaries and CRLF line
-// terminators. It returns the combined part, ready to be nested again or
-// rendered as the top-level message body.
-func combineParts(subtype string, parts []builtPart) (builtPart, error) {
+// combineParts assembles parts into a multipart/subtype body per RFC 2046
+// section 5.1.1, writing each part with Part.Bytes so its bytes are the
+// canonical form a signature would cover. The boundary is random (the one
+// mime/multipart generates).
+func combineParts(subtype string, parts []Part) (Part, error) {
+	boundary := multipart.NewWriter(io.Discard).Boundary()
+	delim := []byte("--" + boundary)
 	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-
-	for _, p := range parts {
-		h := make(textproto.MIMEHeader)
-		h.Set("Content-Type", p.contentType)
-		if p.transferEncoding != "" {
-			h.Set("Content-Transfer-Encoding", p.transferEncoding)
+	for i, p := range parts {
+		pb := p.Bytes()
+		if bytes.Contains(pb, delim) {
+			return Part{}, fmt.Errorf("part %d contains the multipart boundary", i)
 		}
-		for _, kv := range p.extraHeaders {
-			h.Set(kv.K, kv.V)
+		if i > 0 {
+			buf.WriteString("\r\n")
 		}
-
-		pw, err := mw.CreatePart(h)
-		if err != nil {
-			return builtPart{}, fmt.Errorf("create part: %w", err)
-		}
-		if _, err := pw.Write(p.body); err != nil {
-			return builtPart{}, fmt.Errorf("write part body: %w", err)
-		}
+		buf.Write(delim)
+		buf.WriteString("\r\n")
+		buf.Write(pb)
 	}
+	buf.WriteString("\r\n")
+	buf.Write(delim)
+	buf.WriteString("--\r\n")
 
-	if err := mw.Close(); err != nil {
-		return builtPart{}, fmt.Errorf("close multipart writer: %w", err)
-	}
-
-	return builtPart{
-		contentType: fmt.Sprintf("multipart/%s; boundary=%s", subtype, mw.Boundary()),
-		body:        buf.Bytes(),
+	return Part{
+		ContentType: fmt.Sprintf("multipart/%s; boundary=%s", subtype, boundary),
+		Body:        buf.Bytes(),
 	}, nil
 }
 
 // renderMessage writes the full RFC 5322 message: the given header lines,
-// MIME-Version and Content-Type (plus Content-Transfer-Encoding when
-// part is a single, non-multipart body), a blank line, and the body.
-func renderMessage(headers []headerKV, part builtPart) []byte {
+// MIME-Version, the entity's own header fields (Content-Type, plus
+// Content-Transfer-Encoding and extra headers when set), a blank line, and
+// the entity body.
+func renderMessage(headers []headerKV, part Part) []byte {
 	var buf bytes.Buffer
 	for _, kv := range headers {
 		fmt.Fprintf(&buf, "%s: %s\r\n", kv.K, kv.V)
 	}
 	buf.WriteString("MIME-Version: 1.0\r\n")
-	fmt.Fprintf(&buf, "Content-Type: %s\r\n", part.contentType)
-	if part.transferEncoding != "" {
-		fmt.Fprintf(&buf, "Content-Transfer-Encoding: %s\r\n", part.transferEncoding)
-	}
+	part.writeHeader(&buf)
 	buf.WriteString("\r\n")
-	buf.Write(part.body)
+	buf.Write(part.Body)
 	return buf.Bytes()
 }

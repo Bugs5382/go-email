@@ -114,6 +114,12 @@ func (m Message) checkHeaders() error {
 			return err
 		}
 	}
+	if m.Body != nil {
+		if err := m.Body.check("Body"); err != nil {
+			return err
+		}
+		return nil // attachments are not rendered when Body is set
+	}
 	for i, a := range m.Attachments {
 		if err := checkHeaderValue(fmt.Sprintf("attachment[%d] filename", i), a.Filename); err != nil {
 			return err

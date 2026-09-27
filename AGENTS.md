@@ -25,6 +25,14 @@ an optional STARTTLS+auth relay path and a plaintext no-auth path for local catc
   use RFC 2231 plus an RFC 2047 fallback, custom headers render in sorted order, and `Date` and
   `Message-ID` are generated unless set in `Headers`. `Content-Type`,
   `Content-Transfer-Encoding` and `MIME-Version` cannot be set through `Headers`.
+- `Message.Entity()` returns the body as one encoded `Part`; `Part.Bytes()` is its canonical
+  form, and every nested part is written with it, so a signature over it survives rendering. When
+  `Message.Body` is set it replaces HTML/Text/Attachments. Text parts use our own QP encoder
+  (`encodeQP` in `part.go`), which also escapes `From ` at the start of a line.
+- `Sign` and `Encrypt` hand the hook a deep-enough copy (`Message.clone`) and pass that copy on,
+  so the caller's message and any outer middleware (Retry, Record) never see the hook's changes.
+- `SplitBcc` sends one copy to To+Cc and one per Bcc address, using `Message.EnvelopeTo` to limit
+  RCPT TO while keeping the To/Cc headers. Put it outside `Encrypt` and put `Retry` inside it.
 - The core package stays telemetry-free; OpenTelemetry integration lives only in an `email/otel`
   subpackage, imported separately.
 
