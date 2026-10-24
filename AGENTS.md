@@ -36,6 +36,10 @@ an optional STARTTLS+auth relay path and a plaintext no-auth path for local catc
   `pgp`'s Encryptor uses this to split off a plaintext copy for recipients without a key.
 - `SplitBcc` sends one copy to To+Cc and one per Bcc address, using `Message.EnvelopeTo` to limit
   RCPT TO while keeping the To/Cc headers. Put it outside `Encrypt` and put `Retry` inside it.
+- `smtp.SMTPTransport` sends both setups (plaintext catcher and relay) through one session in
+  `deliver`. `classify` (`smtp/transient.go`) wraps any 4xx reply in `email.TransientError`;
+  a QUIT failure is wrapped in `acceptedError` first so it is never transient (the message
+  was already accepted). Keep new session steps inside `deliver` so they are classified too.
 - The core package stays telemetry-free; OpenTelemetry integration lives only in an `email/otel`
   subpackage, imported separately.
 - `pgp` is PGP/MIME (RFC 3156) on `github.com/ProtonMail/go-crypto/openpgp/v2`. Never import

@@ -35,6 +35,7 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"net/textproto"
 	"os"
 	"strings"
 	"sync"
@@ -62,6 +63,35 @@ type fakeSMTP struct {
 	TLSUpgraded bool
 	AuthUser    string
 	AuthPass    string
+
+	// queued holds canned replies per session stage (see failNext). Each
+	// one is used once, in order, in place of the stage's normal reply.
+	queued map[string][]string
+}
+
+// failNext makes the next session that reaches stage answer with line
+// instead of the normal reply. Stages are GREETING, MAIL, RCPT, DATA, END
+// (the reply after the terminating "."), AUTH and QUIT. A canned GREETING or
+// QUIT reply also ends the session.
+func (s *fakeSMTP) failNext(stage, line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.queued == nil {
+		s.queued = make(map[string][]string)
+	}
+	s.queued[stage] = append(s.queued[stage], line)
+}
+
+// canned pops the next canned reply for stage, if any.
+func (s *fakeSMTP) canned(stage string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	q := s.queued[stage]
+	if len(q) == 0 {
+		return "", false
+	}
+	s.queued[stage] = q[1:]
+	return q[0], true
 }
 
 // startFakeSMTP starts a fake SMTP listener on an ephemeral localhost port
@@ -157,6 +187,10 @@ func (s *fakeSMTP) handle(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 
 	r := bufio.NewReader(conn)
+	if line, ok := s.canned("GREETING"); ok {
+		writeLine(conn, line)
+		return
+	}
 	writeLine(conn, "220 fake.local ESMTP ready")
 
 	for {
@@ -176,16 +210,28 @@ func (s *fakeSMTP) handle(conn net.Conn) {
 			}
 			writeLine(conn, "250 8BITMIME")
 		case strings.HasPrefix(upper, "MAIL FROM:"):
+			if reply, ok := s.canned("MAIL"); ok {
+				writeLine(conn, reply)
+				continue
+			}
 			s.mu.Lock()
 			s.MailFrom = extractAddr(line[len("MAIL FROM:"):])
 			s.mu.Unlock()
 			writeLine(conn, "250 OK")
 		case strings.HasPrefix(upper, "RCPT TO:"):
+			if reply, ok := s.canned("RCPT"); ok {
+				writeLine(conn, reply)
+				continue
+			}
 			s.mu.Lock()
 			s.Rcpts = append(s.Rcpts, extractAddr(line[len("RCPT TO:"):]))
 			s.mu.Unlock()
 			writeLine(conn, "250 OK")
 		case upper == "DATA":
+			if reply, ok := s.canned("DATA"); ok {
+				writeLine(conn, reply)
+				continue
+			}
 			writeLine(conn, "354 End data with <CR><LF>.<CR><LF>")
 			var b strings.Builder
 			for {
@@ -201,8 +247,16 @@ func (s *fakeSMTP) handle(conn net.Conn) {
 			s.mu.Lock()
 			s.Data = b.String()
 			s.mu.Unlock()
+			if reply, ok := s.canned("END"); ok {
+				writeLine(conn, reply)
+				continue
+			}
 			writeLine(conn, "250 OK: queued")
 		case upper == "QUIT":
+			if reply, ok := s.canned("QUIT"); ok {
+				writeLine(conn, reply)
+				return
+			}
 			writeLine(conn, "221 Bye")
 			return
 		case upper == "STARTTLS" && s.tlsConfig != nil:
@@ -214,6 +268,10 @@ func (s *fakeSMTP) handle(conn net.Conn) {
 			s.TLSUpgraded = true
 			s.mu.Unlock()
 		case strings.HasPrefix(upper, "AUTH PLAIN"):
+			if reply, ok := s.canned("AUTH"); ok {
+				writeLine(conn, reply)
+				continue
+			}
 			s.recordAuthPlain(line)
 			writeLine(conn, "235 Authentication successful")
 		default:
@@ -573,6 +631,70 @@ func TestSMTPTransport_ContextEndsHungSession(t *testing.T) {
 	}
 }
 
+// replyCode returns the SMTP reply code carried by err, or 0 if err does not
+// wrap a *textproto.Error.
+func replyCode(err error) int {
+	var tpErr *textproto.Error
+	if errors.As(err, &tpErr) {
+		return tpErr.Code
+	}
+	return 0
+}
+
+func isTransient(err error) bool {
+	var transient email.TransientError
+	return errors.As(err, &transient)
+}
+
+func TestSMTPTransport_ReplyClassification(t *testing.T) {
+	cases := []struct {
+		name      string
+		relay     bool
+		stage     string
+		reply     string
+		code      int
+		transient bool
+	}{
+		{"greeting 421", false, "GREETING", "421 4.3.2 service shutting down", 421, true},
+		{"mail 450", false, "MAIL", "450 4.2.1 mailbox busy", 450, true},
+		{"rcpt 451 greylisted", false, "RCPT", "451 4.7.1 greylisted, try again later", 451, true},
+		{"rcpt 452", false, "RCPT", "452 4.5.3 too many recipients", 452, true},
+		{"data 451", false, "DATA", "451 4.3.0 local error", 451, true},
+		{"end of data 452", false, "END", "452 4.3.1 insufficient storage", 452, true},
+		{"auth 454", true, "AUTH", "454 4.7.0 temporary authentication failure", 454, true},
+		{"rcpt 550", false, "RCPT", "550 5.1.1 no such user", 550, false},
+		{"end of data 554", false, "END", "554 5.7.1 rejected as spam", 554, false},
+		{"auth 535", true, "AUTH", "535 5.7.8 bad credentials", 535, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{From: "a@example.com"}
+			var srv *fakeSMTP
+			if tc.relay {
+				srv = startFakeSMTPTLS(t)
+				cfg.User, cfg.Pass, cfg.TLS, cfg.TLSInsecure = "u", "p", true, true
+			} else {
+				srv = startFakeSMTP(t)
+			}
+			cfg.Host, cfg.Port = srv.Host, srv.Port
+			srv.failNext(tc.stage, tc.reply)
+
+			err := NewSMTPTransport(cfg).Send(context.Background(), email.Message{
+				From: "a@example.com", To: []string{"b@example.com"}, Text: "hi",
+			})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := isTransient(err); got != tc.transient {
+				t.Errorf("transient = %v, want %v (err: %v)", got, tc.transient, err)
+			}
+			if got := replyCode(err); got != tc.code {
+				t.Errorf("reply code = %d, want %d (err: %v)", got, tc.code, err)
+			}
+		})
+	}
+}
+
 func TestSMTPTransport_DialTimeoutIsTransient(t *testing.T) {
 	// 192.0.2.1 is TEST-NET-1 (RFC 5737): never assigned, so a SYN to it is
 	// normally dropped and the dial can only end by timing out.
@@ -618,5 +740,44 @@ func TestLoadConfig_Timeouts(t *testing.T) {
 	}
 	if cfg.Timeout != DefaultTimeout {
 		t.Errorf("unitless SMTP_TIMEOUT = %v, want default %v", cfg.Timeout, DefaultTimeout)
+	}
+}
+
+// TestSMTPTransport_QuitFailureIsNotTransient covers a relay that accepts the
+// message and then fails QUIT: the mail is already queued, so retrying would
+// deliver it twice.
+func TestSMTPTransport_QuitFailureIsNotTransient(t *testing.T) {
+	srv := startFakeSMTP(t)
+	srv.failNext("QUIT", "421 4.3.2 closing connection")
+	tr := NewSMTPTransport(Config{Host: srv.Host, Port: srv.Port, From: "a@example.com"})
+
+	err := tr.Send(context.Background(), email.Message{From: "a@example.com", To: []string{"b@example.com"}, Text: "hi"})
+	if err == nil {
+		t.Fatal("expected the QUIT failure to be reported")
+	}
+	if isTransient(err) {
+		t.Errorf("QUIT failure after the message was accepted must not be transient: %v", err)
+	}
+	if replyCode(err) != 421 {
+		t.Errorf("reply code = %d, want 421", replyCode(err))
+	}
+}
+
+// TestSMTPTransport_RetryRecoversFromGreylisting wires the transport behind
+// email.Retry the way the README does and checks that one 451 is retried.
+func TestSMTPTransport_RetryRecoversFromGreylisting(t *testing.T) {
+	srv := startFakeSMTP(t)
+	srv.failNext("RCPT", "451 4.7.1 greylisted, try again later")
+	tr := NewSMTPTransport(Config{Host: srv.Host, Port: srv.Port, From: "a@example.com"})
+	sender := email.New(tr, email.WithMiddleware(email.Retry(3, time.Millisecond)))
+
+	err := sender.Send(context.Background(), email.Message{From: "a@example.com", To: []string{"b@example.com"}, Text: "hi"})
+	if err != nil {
+		t.Fatalf("Send after one greylisting reply = %v, want nil", err)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.Rcpts) != 1 || srv.Rcpts[0] != "b@example.com" {
+		t.Errorf("RCPT TO = %v, want [b@example.com]", srv.Rcpts)
 	}
 }

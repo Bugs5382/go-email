@@ -75,8 +75,9 @@ attachments referenced via `cid:`), arbitrary `Headers`, `Priority` and
 handing it to the `Transport`:
 
 - `Validate()` -- rejects a `Message` missing a `From` or any recipient.
-- `Retry(attempts, base)` -- retries a failed `Send` with exponential
-  backoff.
+- `Retry(attempts, base)` -- retries a `Send` that failed with an
+  `email.TransientError`, with exponential backoff. Anything else fails
+  straight away.
 - `Dedupe(Deduper)` -- skips a `Message` already seen by a caller-supplied
   `Deduper` (an in-memory `MemDeduper` is included).
 - `Record(Recorder)` -- reports every send attempt, success or failure, to a
@@ -95,7 +96,11 @@ instead of aborting the batch on the first failure.
 
 - [`smtp`](smtp) -- `Config`/`LoadConfig` and an `SMTPTransport` speaking
   `net/smtp`, with a plaintext no-auth path for local catchers (e.g.
-  `maildev`) and an optional STARTTLS+auth relay path.
+  `maildev`) and an optional STARTTLS+auth relay path. A 4xx reply from the
+  server (421, 450, 451, 452, 454 and the like) comes back as an
+  `email.TransientError`, so `Retry` retries it; a 5xx reply is permanent,
+  and a failed `QUIT` after the server accepted the message is never
+  retried. The server's `*textproto.Error` is still there for `errors.As`.
 - [`template`](template) -- a `TemplateRenderer` backed by the standard
   library's `text/template` (subject, plaintext) and `html/template` (HTML,
   auto-escaped) packages.
