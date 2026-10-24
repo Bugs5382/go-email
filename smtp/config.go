@@ -27,6 +27,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	log "github.com/Bugs5382/go-log"
 )
 
 // Default limits applied when Config.DialTimeout or Config.Timeout is zero.
@@ -63,6 +65,13 @@ type Config struct {
 	// large message keeps going as long as the server keeps reading. Zero
 	// means the default; a negative value means no limit.
 	Timeout time.Duration
+	// Logger receives the transport's logs: one line when a send starts and
+	// one with its outcome (relay, duration, the failing stage and the
+	// server's reply code), plus a trace line per SMTP stage. It never logs
+	// credentials, addresses or message content; a failed recipient is
+	// logged as an opaque rcpt_id. Nil (the default, and what LoadConfig
+	// returns) means the transport logs nothing.
+	Logger log.Logger
 }
 
 // LoadConfig reads SMTP_* env vars with local-catcher (e.g. maildev) defaults:

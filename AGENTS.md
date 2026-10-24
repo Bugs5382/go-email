@@ -40,6 +40,11 @@ an optional STARTTLS+auth relay path and a plaintext no-auth path for local catc
   `deliver`. `classify` (`smtp/transient.go`) wraps any 4xx reply in `email.TransientError`;
   a QUIT failure is wrapped in `acceptedError` first so it is never transient (the message
   was already accepted). Keep new session steps inside `deliver` so they are classified too.
+- `smtp` logs through `Config.Logger` (a `go-log` `Logger`; nil means silent, via `log.Nop`).
+  Every stage in `deliver` runs through `session.step` (`smtp/log.go`), which traces it and records
+  the stage and its raw error for the outcome line. Only that raw cause is logged, never the
+  wrapped error (the RCPT wrapper quotes the address), and a server reply is reduced to its code.
+  Never log credentials, addresses, the subject or the body; a failed recipient is `rcpt_id`.
 - The core package stays telemetry-free; OpenTelemetry integration lives only in an `email/otel`
   subpackage, imported separately.
 - `pgp` is PGP/MIME (RFC 3156) on `github.com/ProtonMail/go-crypto/openpgp/v2`. Never import
@@ -70,7 +75,8 @@ an optional STARTTLS+auth relay path and a plaintext no-auth path for local catc
   `interop_test.go` (build tag `interop`) runs against gpg; `fuzz_test.go` fuzzes every parser.
 - `internal/mimeparse/` - the raw-MIME reader used by `pgp` for inbound mail.
 - `smtp/` - `config.go` (`Config`, `LoadConfig`, the default limits), `transport.go`
-  (`SMTPTransport`; both setups run through `deliver`), `dial.go` (`dial` and `deadlineConn`:
+  (`SMTPTransport`; both setups run through `deliver`), `log.go` (the per-send `session`, its
+  stage tracing and outcome line, and `rcptID`), `dial.go` (`dial` and `deadlineConn`:
   the dial timeout, a fresh per-read/write deadline from `Timeout` or the ctx deadline, and
   ctx cancellation that unblocks a hung read). New session steps go through `deliver` so they
   inherit the limits.

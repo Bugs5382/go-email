@@ -55,6 +55,27 @@ reaching its deadline, also ends a send that is waiting on the server. A dial
 that times out comes back as an `email.TransientError`, since nothing was
 sent.
 
+🪵 Set `Config.Logger` to a [go-log](https://github.com/Bugs5382/go-log)
+`Logger` to see what the transport does. It's nil by default, which logs
+nothing. With a logger set, each send writes a debug line when it starts
+(relay, recipient count, message size, TLS mode, whether it authenticates),
+a trace line per SMTP stage with its timing, and one outcome line: info when
+the relay accepted the message, warn for a 4xx reply, a context that ended
+or a failed QUIT after the message was accepted, and error for anything
+permanent. The outcome line names the failing stage and the server's reply
+code, and every line from one send shares a random `send_id`.
+
+```go
+cfg := smtp.LoadConfig()
+cfg.Logger = log.NewLogger("billing")
+transport := smtp.NewSMTPTransport(cfg)
+```
+
+The logs never carry credentials, addresses, the subject or the body. The
+server's reply text is dropped too, since relays often echo the address in
+it; a rejected recipient shows up as `rcpt_id`, a keyed hash that's random per
+process.
+
 ## 📨 Envelope
 
 `Message` is the neutral, transport-agnostic envelope: `From`/`To`/`Cc`/`Bcc`,
