@@ -3,7 +3,7 @@ module github.com/Bugs5382/go-email
 go 1.26.0
 
 require (
-	github.com/Bugs5382/go-log v1.2.2
+	github.com/Bugs5382/go-log v1.4.0
 	github.com/ProtonMail/go-crypto v1.5.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0

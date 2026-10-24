@@ -1,5 +1,5 @@
-github.com/Bugs5382/go-log v1.2.2 h1:803glsSyES6lNdvx4vbMYo6ur0KZBPiIatilvIqJfLc=
-github.com/Bugs5382/go-log v1.2.2/go.mod h1:OGgIWWKKNg2AXVJlbVJZb/s8dnqqsrKwWznYXik547E=
+github.com/Bugs5382/go-log v1.4.0 h1:6AKDyc8PSxjW/dkkL0zCy9tKz3ce7c16f4PXQAsWYFI=
+github.com/Bugs5382/go-log v1.4.0/go.mod h1:OGgIWWKKNg2AXVJlbVJZb/s8dnqqsrKwWznYXik547E=
 github.com/ProtonMail/go-crypto v1.5.1 h1:pTrLDQHyOT8y3DFYIpijgPBTw/7E2GLMimutvOlceuE=
 github.com/ProtonMail/go-crypto v1.5.1/go.mod h1:/RaSu30DaKO4RY+XdV/ACcCcZkGr7AhUIduq5sjzzCo=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
