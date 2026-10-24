@@ -26,6 +26,15 @@ OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 import (
 	"os"
 	"strconv"
+	"time"
+)
+
+// Default limits applied when Config.DialTimeout or Config.Timeout is zero.
+// DefaultTimeout follows the five-minute command timeout RFC 5321 4.5.3.2
+// suggests for SMTP clients, so a slow but working relay is not cut off.
+const (
+	DefaultDialTimeout = 30 * time.Second
+	DefaultTimeout     = 5 * time.Minute
 )
 
 // Config is the resolved SMTP configuration consumed by SMTPTransport. Build
@@ -43,10 +52,24 @@ type Config struct {
 	// cert-verified. Only set true for a trusted relay with a non-standard
 	// certificate.
 	TLSInsecure bool
+	// DialTimeout bounds how long connecting to the server may take
+	// (SMTP_DIAL_TIMEOUT, default DefaultDialTimeout). Zero means the
+	// default; a negative value means no limit. A dial that times out is
+	// returned as an email.TransientError, since nothing was sent.
+	DialTimeout time.Duration
+	// Timeout bounds how long any single read or write on the connection may
+	// block, from the greeting through QUIT (SMTP_TIMEOUT, default
+	// DefaultTimeout). It is an idle limit, not a limit on the whole send: a
+	// large message keeps going as long as the server keeps reading. Zero
+	// means the default; a negative value means no limit.
+	Timeout time.Duration
 }
 
 // LoadConfig reads SMTP_* env vars with local-catcher (e.g. maildev) defaults:
-// host localhost, port 1025, no user/pass, From no-reply@example.com, no TLS.
+// host localhost, port 1025, no user/pass, From no-reply@example.com, no TLS,
+// and the DefaultDialTimeout and DefaultTimeout limits. SMTP_DIAL_TIMEOUT and
+// SMTP_TIMEOUT take Go duration strings such as "10s" or "2m"; a value that
+// does not parse falls back to the default.
 func LoadConfig() Config {
 	return Config{
 		Host:        getOr("SMTP_HOST", "localhost"),
@@ -56,6 +79,8 @@ func LoadConfig() Config {
 		From:        getOr("SMTP_FROM", "no-reply@example.com"),
 		TLS:         getBoolOr("SMTP_TLS", false),
 		TLSInsecure: getBoolOr("SMTP_TLS_INSECURE", false),
+		DialTimeout: getDurationOr("SMTP_DIAL_TIMEOUT", DefaultDialTimeout),
+		Timeout:     getDurationOr("SMTP_TIMEOUT", DefaultTimeout),
 	}
 }
 
@@ -79,6 +104,15 @@ func getBoolOr(k string, d bool) bool {
 	if v := os.Getenv(k); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
+		}
+	}
+	return d
+}
+
+func getDurationOr(k string, d time.Duration) time.Duration {
+	if v := os.Getenv(k); v != "" {
+		if dur, err := time.ParseDuration(v); err == nil {
+			return dur
 		}
 	}
 	return d
