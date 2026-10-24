@@ -36,8 +36,9 @@ import (
 
 // SMTPTransport is an email.Transport backed by net/smtp. With no SMTP_USER
 // and no TLS configured (the default, matching a local catcher like maildev)
-// it does a bare, unauthenticated handshake; otherwise it STARTTLS-upgrades
-// and/or authenticates against a real relay.
+// it does a bare, unauthenticated handshake, upgrading with STARTTLS only if
+// the server offers it; otherwise it STARTTLS-upgrades and/or authenticates
+// against a real relay.
 type SMTPTransport struct {
 	cfg Config
 }
@@ -69,35 +70,22 @@ func (t *SMTPTransport) Send(ctx context.Context, m email.Message) error {
 		return fmt.Errorf("build mime: %w", err)
 	}
 
-	if !t.cfg.TLS && t.cfg.User == "" {
-		// Plaintext, no-auth path (e.g. a local catcher like maildev): use
-		// SendMail with a nil auth.
-		if err := smtp.SendMail(addr, nil, from, rcpts, msg); err != nil {
-			return fmt.Errorf("smtp send: %w", err)
-		}
-		return nil
-	}
-
-	return t.sendViaRelay(addr, from, rcpts, msg)
+	return t.deliver(ctx, addr, from, rcpts, msg)
 }
 
-// sendViaRelay authenticates and/or STARTTLS-upgrades against a real relay:
-// Dial, optional StartTLS, optional Auth, then Mail/Rcpt/Data/Quit.
-func (t *SMTPTransport) sendViaRelay(addr, from string, rcpts []string, msg []byte) error {
+// deliver runs one SMTP session against addr: Dial, STARTTLS, optional Auth,
+// then Mail/Rcpt/Data/Quit. Both the plaintext local-catcher setup and the
+// relay setup go through it; they differ only in how STARTTLS and Auth are
+// decided (see startTLS).
+func (t *SMTPTransport) deliver(_ context.Context, addr, from string, rcpts []string, msg []byte) error {
 	client, err := smtp.Dial(addr)
 	if err != nil {
 		return fmt.Errorf("smtp dial: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 
-	if t.cfg.TLS {
-		// #nosec G402 -- InsecureSkipVerify is opt-in (Config.TLSInsecure,
-		// default false/verified) for relays with a non-standard certificate;
-		// the connection stays encrypted either way.
-		tlsCfg := &tls.Config{ServerName: t.cfg.Host, InsecureSkipVerify: t.cfg.TLSInsecure} //nolint:gosec
-		if err := client.StartTLS(tlsCfg); err != nil {
-			return fmt.Errorf("smtp starttls: %w", err)
-		}
+	if err := t.startTLS(client); err != nil {
+		return fmt.Errorf("smtp starttls: %w", err)
 	}
 	if t.cfg.User != "" {
 		auth := smtp.PlainAuth("", t.cfg.User, t.cfg.Pass, t.cfg.Host)
@@ -126,6 +114,26 @@ func (t *SMTPTransport) sendViaRelay(addr, from string, rcpts []string, msg []by
 	}
 	if err := client.Quit(); err != nil {
 		return fmt.Errorf("smtp quit: %w", err)
+	}
+	return nil
+}
+
+// startTLS upgrades the session when the Config asks for it. With TLS set it
+// always upgrades, honoring TLSInsecure. With neither TLS nor a User set (the
+// local-catcher setup) it upgrades only when the server offers STARTTLS, with
+// full certificate verification, the same as net/smtp.SendMail. A User
+// without TLS stays plaintext.
+func (t *SMTPTransport) startTLS(client *smtp.Client) error {
+	switch {
+	case t.cfg.TLS:
+		// #nosec G402 -- InsecureSkipVerify is opt-in (Config.TLSInsecure,
+		// default false/verified) for relays with a non-standard certificate;
+		// the connection stays encrypted either way.
+		return client.StartTLS(&tls.Config{ServerName: t.cfg.Host, InsecureSkipVerify: t.cfg.TLSInsecure}) //nolint:gosec
+	case t.cfg.User == "":
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			return client.StartTLS(&tls.Config{ServerName: t.cfg.Host})
+		}
 	}
 	return nil
 }
