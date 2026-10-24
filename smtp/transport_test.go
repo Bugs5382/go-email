@@ -32,6 +32,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"errors"
 	"math/big"
 	"net"
 	"strings"
@@ -344,6 +345,28 @@ func TestSMTPTransport_RelaySTARTTLSAndAuth(t *testing.T) {
 	assertSameSet(t, srv.Rcpts, []string{"b@example.com"})
 	if !strings.Contains(srv.Data, "Subject: S") {
 		t.Error("expected the message to be delivered over the TLS-upgraded connection")
+	}
+}
+
+// TestSMTPTransport_PlaintextPathUpgradesWhenOffered pins the plaintext
+// path's opportunistic STARTTLS: with no TLS and no user configured, a server
+// that offers STARTTLS is still upgraded, with full certificate verification,
+// so a self-signed relay certificate is rejected rather than silently
+// accepted.
+func TestSMTPTransport_PlaintextPathUpgradesWhenOffered(t *testing.T) {
+	srv := startFakeSMTPTLS(t)
+	tr := NewSMTPTransport(Config{Host: srv.Host, Port: srv.Port, From: "a@example.com"})
+
+	err := tr.Send(context.Background(), email.Message{From: "a@example.com", To: []string{"b@example.com"}, Text: "hi"})
+	if err == nil {
+		t.Fatal("expected the unverifiable STARTTLS certificate to fail the send")
+	}
+	var certErr *tls.CertificateVerificationError
+	if !errors.As(err, &certErr) {
+		t.Fatalf("err = %v, want a certificate verification failure", err)
+	}
+	if srv.MailFrom != "" {
+		t.Errorf("MAIL FROM = %q, want nothing sent before the failed upgrade", srv.MailFrom)
 	}
 }
 
