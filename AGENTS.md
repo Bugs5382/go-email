@@ -69,6 +69,11 @@ an optional STARTTLS+auth relay path and a plaintext no-auth path for local catc
   `verify.go` (`Verify`, `Decrypt`), `mime.go` (RFC 3156 framing), `options.go`, `log.go`.
   `interop_test.go` (build tag `interop`) runs against gpg; `fuzz_test.go` fuzzes every parser.
 - `internal/mimeparse/` - the raw-MIME reader used by `pgp` for inbound mail.
+- `smtp/` - `config.go` (`Config`, `LoadConfig`, the default limits), `transport.go`
+  (`SMTPTransport`; both setups run through `deliver`), `dial.go` (`dial` and `deadlineConn`:
+  the dial timeout, a fresh per-read/write deadline from `Timeout` or the ctx deadline, and
+  ctx cancellation that unblocks a hung read). New session steps go through `deliver` so they
+  inherit the limits.
 
 This section grows as the envelope, renderer, transport, and middleware chain are implemented in
 later tasks; update it alongside each new file.

@@ -36,6 +36,7 @@ import (
 	"math/big"
 	"net"
 	"net/textproto"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -495,6 +496,141 @@ func TestLoadConfig_Overrides(t *testing.T) {
 	}
 }
 
+// startScriptedSMTP starts a listener that greets (unless greet is empty),
+// answers each command line with the next reply in script, and then stops
+// answering while keeping the connection open: a relay that has hung.
+func startScriptedSMTP(t *testing.T, greet string, script ...string) (string, int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	done := make(chan struct{})
+	var conns []net.Conn
+	var mu sync.Mutex
+	t.Cleanup(func() {
+		close(done)
+		_ = ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+	})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+			go func(conn net.Conn) {
+				if greet != "" {
+					writeLine(conn, greet)
+				}
+				r := bufio.NewReader(conn)
+				for _, reply := range script {
+					if _, err := r.ReadString('\n'); err != nil {
+						return
+					}
+					writeLine(conn, reply)
+				}
+				<-done
+			}(conn)
+		}
+	}()
+	addr := ln.Addr().(*net.TCPAddr)
+	return addr.IP.String(), addr.Port
+}
+
+// sendWithin runs Send and fails the test if it hasn't returned within limit,
+// so a missing timeout shows up as a test failure rather than a hung run.
+func sendWithin(t *testing.T, ctx context.Context, tr *SMTPTransport, limit time.Duration) (time.Duration, error) {
+	t.Helper()
+	start := time.Now()
+	errc := make(chan error, 1)
+	go func() {
+		errc <- tr.Send(ctx, email.Message{From: "a@example.com", To: []string{"b@example.com"}, Text: "hi"})
+	}()
+	select {
+	case err := <-errc:
+		return time.Since(start), err
+	case <-time.After(limit):
+		t.Fatalf("Send still blocked after %v", limit)
+		return 0, nil
+	}
+}
+
+func TestSMTPTransport_TimeoutOnSilentGreeting(t *testing.T) {
+	host, port := startScriptedSMTP(t, "")
+	tr := NewSMTPTransport(Config{Host: host, Port: port, Timeout: 200 * time.Millisecond})
+
+	took, err := sendWithin(t, context.Background(), tr, 5*time.Second)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("err = %v, want os.ErrDeadlineExceeded", err)
+	}
+	if took < 150*time.Millisecond {
+		t.Errorf("returned after %v, before the 200ms timeout could have fired", took)
+	}
+}
+
+func TestSMTPTransport_TimeoutMidSession(t *testing.T) {
+	// Greets and answers EHLO, then never answers MAIL FROM.
+	host, port := startScriptedSMTP(t, "220 hung.local ESMTP", "250 hung.local")
+	tr := NewSMTPTransport(Config{Host: host, Port: port, Timeout: 200 * time.Millisecond})
+
+	_, err := sendWithin(t, context.Background(), tr, 5*time.Second)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("err = %v, want os.ErrDeadlineExceeded", err)
+	}
+	if !strings.Contains(err.Error(), "mail from") {
+		t.Errorf("err = %v, want it to name the MAIL FROM stage", err)
+	}
+	var transient email.TransientError
+	if errors.As(err, &transient) {
+		t.Errorf("a mid-session timeout must not be transient: %v", err)
+	}
+}
+
+func TestSMTPTransport_ContextEndsHungSession(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		{"cancel", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(150*time.Millisecond, cancel)
+			return ctx, cancel
+		}, context.Canceled},
+		{"deadline", func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 150*time.Millisecond)
+		}, context.DeadlineExceeded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			host, port := startScriptedSMTP(t, "220 hung.local ESMTP", "250 hung.local")
+			// Timeout disabled: only the context can end the session.
+			tr := NewSMTPTransport(Config{Host: host, Port: port, Timeout: -1})
+			ctx, cancel := tc.ctx()
+			defer cancel()
+
+			_, err := sendWithin(t, ctx, tr, 5*time.Second)
+			if !errors.Is(err, tc.want) {
+				t.Errorf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 // replyCode returns the SMTP reply code carried by err, or 0 if err does not
 // wrap a *textproto.Error.
 func replyCode(err error) int {
@@ -556,6 +692,54 @@ func TestSMTPTransport_ReplyClassification(t *testing.T) {
 				t.Errorf("reply code = %d, want %d (err: %v)", got, tc.code, err)
 			}
 		})
+	}
+}
+
+func TestSMTPTransport_DialTimeoutIsTransient(t *testing.T) {
+	// 192.0.2.1 is TEST-NET-1 (RFC 5737): never assigned, so a SYN to it is
+	// normally dropped and the dial can only end by timing out.
+	tr := NewSMTPTransport(Config{Host: "192.0.2.1", Port: 25, DialTimeout: 200 * time.Millisecond})
+
+	took, err := sendWithin(t, context.Background(), tr, 10*time.Second)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Skipf("this network rejected the dial at once (%v), so the timeout can't be observed here", err)
+	}
+	if took > 3*time.Second {
+		t.Errorf("dial took %v, want it bounded by the 200ms DialTimeout", took)
+	}
+	var transient email.TransientError
+	if !errors.As(err, &transient) {
+		t.Errorf("a dial timeout should be transient (nothing was sent): %v", err)
+	}
+}
+
+func TestLoadConfig_Timeouts(t *testing.T) {
+	t.Setenv("SMTP_DIAL_TIMEOUT", "")
+	t.Setenv("SMTP_TIMEOUT", "")
+	cfg := LoadConfig()
+	if cfg.DialTimeout != DefaultDialTimeout || cfg.Timeout != DefaultTimeout {
+		t.Errorf("defaults = %v/%v, want %v/%v", cfg.DialTimeout, cfg.Timeout, DefaultDialTimeout, DefaultTimeout)
+	}
+
+	t.Setenv("SMTP_DIAL_TIMEOUT", "5s")
+	t.Setenv("SMTP_TIMEOUT", "2m")
+	cfg = LoadConfig()
+	if cfg.DialTimeout != 5*time.Second || cfg.Timeout != 2*time.Minute {
+		t.Errorf("overrides = %v/%v, want 5s/2m", cfg.DialTimeout, cfg.Timeout)
+	}
+
+	t.Setenv("SMTP_DIAL_TIMEOUT", "soon")
+	t.Setenv("SMTP_TIMEOUT", "-1")
+	cfg = LoadConfig()
+	if cfg.DialTimeout != DefaultDialTimeout {
+		t.Errorf("unparseable SMTP_DIAL_TIMEOUT = %v, want default %v", cfg.DialTimeout, DefaultDialTimeout)
+	}
+	if cfg.Timeout != DefaultTimeout {
+		t.Errorf("unitless SMTP_TIMEOUT = %v, want default %v", cfg.Timeout, DefaultTimeout)
 	}
 }
 

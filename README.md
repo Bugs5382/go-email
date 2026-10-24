@@ -45,6 +45,16 @@ point it at a real relay by setting `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/
 `SMTP_PASS`/`SMTP_TLS` in production. See [`example_test.go`](example_test.go)
 for a complete, compilable example.
 
+⏱️ Every SMTP send is time-bounded. `Config.DialTimeout` (`SMTP_DIAL_TIMEOUT`,
+default `30s`) caps the connect, and `Config.Timeout` (`SMTP_TIMEOUT`,
+default `5m`, the command timeout RFC 5321 suggests) caps how long any single
+read or write may wait on the server, so a relay that hangs can't block a
+send forever. Both take Go duration strings; zero means the default and a
+negative value turns the limit off. Cancelling the `ctx` passed to `Send`, or
+reaching its deadline, also ends a send that is waiting on the server. A dial
+that times out comes back as an `email.TransientError`, since nothing was
+sent.
+
 ## 📨 Envelope
 
 `Message` is the neutral, transport-agnostic envelope: `From`/`To`/`Cc`/`Bcc`,

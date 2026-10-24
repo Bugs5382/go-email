@@ -39,6 +39,13 @@ import (
 // it does a bare, unauthenticated handshake, upgrading with STARTTLS only if
 // the server offers it; otherwise it STARTTLS-upgrades and/or authenticates
 // against a real relay.
+//
+// Every send is bounded in time: connecting by Config.DialTimeout, and each
+// read or write on the connection by Config.Timeout (both have defaults, see
+// DefaultDialTimeout and DefaultTimeout). The ctx passed to Send is honored
+// for the whole session, so cancelling it or reaching its deadline ends a send
+// that is waiting on the server, and the error matches ctx.Err() with
+// errors.Is.
 type SMTPTransport struct {
 	cfg Config
 }
@@ -84,8 +91,8 @@ func (t *SMTPTransport) Send(ctx context.Context, m email.Message) error {
 // then Mail/Rcpt/Data/Quit. Both the plaintext local-catcher setup and the
 // relay setup go through it; they differ only in how STARTTLS and Auth are
 // decided (see startTLS).
-func (t *SMTPTransport) deliver(_ context.Context, addr, from string, rcpts []string, msg []byte) error {
-	client, err := smtp.Dial(addr)
+func (t *SMTPTransport) deliver(ctx context.Context, addr, from string, rcpts []string, msg []byte) error {
+	client, err := t.dial(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("smtp dial: %w", err)
 	}
