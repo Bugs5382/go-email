@@ -52,6 +52,13 @@ func NewSMTPTransport(cfg Config) *SMTPTransport {
 // ∪ Bcc set) using the SMTP envelope MAIL FROM of m.EnvelopeFrom, falling
 // back to m.From when EnvelopeFrom is unset. Bcc addresses are only ever used
 // for RCPT TO -- m.Bytes never writes them into the message headers.
+//
+// A 4xx reply from the server at any stage before the message is accepted
+// (greeting, STARTTLS, AUTH, MAIL, RCPT, DATA or the end-of-data reply) is
+// returned wrapped in email.TransientError, so email.Retry retries it; 5xx
+// replies are permanent. A failed QUIT after the server accepted the message
+// is reported but never transient, so a retry can't send it twice. The
+// server's *textproto.Error is reachable with errors.As in every case.
 func (t *SMTPTransport) Send(ctx context.Context, m email.Message) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("email: context: %w", err)
@@ -70,7 +77,7 @@ func (t *SMTPTransport) Send(ctx context.Context, m email.Message) error {
 		return fmt.Errorf("build mime: %w", err)
 	}
 
-	return t.deliver(ctx, addr, from, rcpts, msg)
+	return classify(t.deliver(ctx, addr, from, rcpts, msg))
 }
 
 // deliver runs one SMTP session against addr: Dial, STARTTLS, optional Auth,
@@ -113,7 +120,7 @@ func (t *SMTPTransport) deliver(_ context.Context, addr, from string, rcpts []st
 		return fmt.Errorf("smtp close data: %w", err)
 	}
 	if err := client.Quit(); err != nil {
-		return fmt.Errorf("smtp quit: %w", err)
+		return fmt.Errorf("smtp quit: %w", acceptedError{err: err})
 	}
 	return nil
 }
